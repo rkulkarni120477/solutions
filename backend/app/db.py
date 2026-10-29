@@ -1,0 +1,108 @@
+import uuid
+from datetime import datetime, timezone
+from sqlalchemy import create_engine, String, Text, JSON, ForeignKey, DateTime, Integer, UniqueConstraint, event
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+from .config import settings
+
+
+def uid():
+    return str(uuid.uuid4())
+
+
+def now():
+    return datetime.now(timezone.utc)
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class User(Base):
+    __tablename__ = 'users'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    subject: Mapped[str] = mapped_column(String(700), unique=True)
+    name: Mapped[str] = mapped_column(String(200))
+
+
+class Project(Base):
+    __tablename__ = 'projects'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    owner_id: Mapped[str] = mapped_column(ForeignKey('users.id'), index=True)
+    title: Mapped[str] = mapped_column(String(160))
+    decisions: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class Version(Base):
+    __tablename__ = 'versions'
+    __table_args__ = (UniqueConstraint('project_id', 'number'),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    project_id: Mapped[str] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), index=True)
+    number: Mapped[int] = mapped_column(Integer)
+    prompt: Mapped[str] = mapped_column(Text)
+    preferences: Mapped[dict] = mapped_column(JSON, default=dict)
+    response: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    context_sources: Mapped[list] = mapped_column(JSON, default=list)
+    provider: Mapped[str] = mapped_column(String(30))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class Attachment(Base):
+    __tablename__ = 'attachments'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    project_id: Mapped[str] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), index=True)
+    filename: Mapped[str] = mapped_column(String(220))
+    key: Mapped[str] = mapped_column(String(500))
+    size: Mapped[int] = mapped_column(Integer)
+    passages: Mapped[list] = mapped_column(JSON, default=list)
+    warning: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class Job(Base):
+    __tablename__ = 'jobs'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    project_id: Mapped[str] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), index=True)
+    version_id: Mapped[str] = mapped_column(ForeignKey('versions.id', ondelete='CASCADE'))
+    status: Mapped[str] = mapped_column(String(40), default='Queued', index=True)
+    kind: Mapped[str] = mapped_column(String(40), default='solution')
+    artifact_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class Artifact(Base):
+    __tablename__ = 'artifacts'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    project_id: Mapped[str] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), index=True)
+    version_id: Mapped[str] = mapped_column(ForeignKey('versions.id', ondelete='CASCADE'), index=True)
+    kind: Mapped[str] = mapped_column(String(40))
+    filename: Mapped[str] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(String(30), default='Queued')
+    key: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class Audit(Base):
+    __tablename__ = 'audit_events'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    user_id: Mapped[str] = mapped_column(String(36), index=True)
+    action: Mapped[str] = mapped_column(String(80))
+    resource_id: Mapped[str] = mapped_column(String(36))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+engine = create_engine(settings.database_url, connect_args={'check_same_thread': False} if settings.database_url.startswith('sqlite') else {}, pool_pre_ping=True)
+if settings.database_url.startswith('sqlite'):
+    @event.listens_for(engine, 'connect')
+    def sqlite_options(conn, _):
+        conn.execute('PRAGMA foreign_keys=ON')
+        conn.execute('PRAGMA busy_timeout=10000')
+Session = sessionmaker(engine, expire_on_commit=False)
+
+
+def get_db():
+    with Session() as db:
+        yield db

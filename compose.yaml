@@ -1,0 +1,93 @@
+name: solution-architect-workspace
+x-app-env: &app-env
+  DATABASE_URL: postgresql+psycopg://workspace:${POSTGRES_PASSWORD:-local-workspace-only}@postgres:5432/workspace
+  STORAGE_BACKEND: s3
+  S3_ENDPOINT: http://minio:9000
+  S3_BUCKET: workspace
+  S3_SSE: ""
+  AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-workspace-local}
+  AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-workspace-local-password}
+  RENDERER_URL: http://renderer:3001
+  PUBLIC_URL: http://localhost:8000
+  EMBEDDED_WORKER: "false"
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: workspace
+      POSTGRES_USER: workspace
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-workspace-only}
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U workspace"]
+      interval: 5s
+      retries: 15
+    restart: unless-stopped
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-workspace-local}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-workspace-local-password}
+    volumes: [object-data:/data]
+    restart: unless-stopped
+  storage-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    depends_on: [minio]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-workspace-local}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-workspace-local-password}
+    entrypoint: [/bin/sh, -c]
+    command:
+      - >-
+        until mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"; do sleep 2; done;
+        mc mb --ignore-existing local/workspace
+  migrate:
+    build: .
+    env_file: .env
+    environment: *app-env
+    command: [alembic, -c, backend/alembic.ini, upgrade, head]
+    depends_on:
+      postgres: {condition: service_healthy}
+  renderer:
+    build: ./renderer
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      # Local Compose convenience only. Production: enable Chromium sandbox with seccomp.
+      RENDERER_NO_SANDBOX: "true"
+    read_only: true
+    tmpfs: [/tmp:size=512m]
+    shm_size: 256mb
+    mem_limit: 1g
+    cpus: 1
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+  api:
+    build: .
+    env_file: .env
+    environment: *app-env
+    ports: ["127.0.0.1:8000:8000"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      storage-init: {condition: service_completed_successfully}
+    restart: unless-stopped
+  worker:
+    build: .
+    env_file: .env
+    environment: *app-env
+    command: [python, -m, app.worker]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      storage-init: {condition: service_completed_successfully}
+      renderer: {condition: service_started}
+    read_only: true
+    tmpfs: [/tmp:size=256m, /app/.data:size=16m]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 1g
+    restart: unless-stopped
+volumes:
+  postgres-data:
+  object-data:
