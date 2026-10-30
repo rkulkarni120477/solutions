@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Bot, Check, ChevronRight, CircleAlert, Clock3, FileCheck2, LoaderCircle, UserRound, Workflow } from 'lucide-react';
 import './workflow-progress.css';
+import { ExecutionDetails } from './ExecutionDetails';
 
 type WorkflowJob = {id:string;status:string;kind?:string;error:string|null};
 type Step = {name:string;description:string;statuses:string[]};
@@ -28,6 +29,7 @@ export function WorkflowProgress({job,artifacts=[],proposal}:{job:WorkflowJob;ar
  const steps=isProposal?proposalSteps:['files','artifact'].includes(job.kind||'')?documentSteps:solutionSteps;
  const reportedStep=steps.findIndex(step=>step.statuses.includes(job.status));
  const [lastStep,setLastStep]=useState(reportedStep);
+ const [detailsOpen,setDetailsOpen]=useState(true),[inspected,setInspected]=useState<number|null>(null);
  useEffect(()=>{if(reportedStep>=0)setLastStep(reportedStep);},[reportedStep]);
  const cancelled=job.status==='Cancelled';
  const failed=job.status==='Failed'||cancelled;
@@ -41,6 +43,8 @@ export function WorkflowProgress({job,artifacts=[],proposal}:{job:WorkflowJob;ar
  let percent=current<0?null:Math.round(current/steps.length*100);
  if(job.status==='Creating Files'&&artifacts.length)percent=Math.min(99,Math.round((documentIndex+processed/artifacts.length)/steps.length*100));
  if(complete)percent=100;
+ const detailIndex=inspected??(current>=0?Math.min(current,steps.length-1):-1);
+ const detailStep=steps[detailIndex];
  const currentName=steps[current]?.name;
  const queued=job.status==='Queued';
  const badge=cancelled?'Cancelled':failed?'Stopped':paused?'Waiting for you':complete?job.error?'Finished with warnings':'Completed':queued?'Queued':'Executing';
@@ -59,9 +63,12 @@ export function WorkflowProgress({job,artifacts=[],proposal}:{job:WorkflowJob;ar
     const selected=!complete&&index===current;
     const state=done?'done':selected?failed?'failed':paused?'waiting':queued?'queued':'running':'pending';
     const Icon=done?Check:selected&&failed?CircleAlert:selected&&paused?UserRound:selected&&!queued?LoaderCircle:step.name==='Request queue'?Clock3:step.name==='Human review'?UserRound:step.name==='Publish'||index===documentIndex?FileCheck2:Bot;
-    return <li key={step.name} className={'workflow-agent '+state} aria-current={selected?'step':undefined}><span className="workflow-agent-icon"><Icon size={17} className={state==='running'?'spin':undefined}/></span><div><strong>{step.name}</strong><p>{step.description}</p><span className="workflow-agent-status">{done?'Completed':selected?failed?'Stopped':paused?'Awaiting action':queued?'Queued':'Executing':'Pending'}</span></div>{index<steps.length-1&&<ChevronRight size={15} className="workflow-connector" aria-hidden="true"/>}</li>;
+    return <li key={step.name} className={'workflow-agent '+state+(detailsOpen&&index===detailIndex?' inspecting':'')} aria-current={selected?'step':undefined}><span className="workflow-agent-icon"><Icon size={17} className={state==='running'?'spin':undefined}/></span><div><strong>{step.name}</strong><p>{step.description}</p><span className="workflow-agent-status">{done?'Completed':selected?failed?'Stopped':paused?'Awaiting action':queued?'Queued':'Executing':'Pending'}</span></div><button className="workflow-agent-select" aria-label={"Execution details: "+step.name} aria-expanded={detailsOpen&&index===detailIndex} aria-controls={"execution-details-"+job.id} onClick={()=>{setInspected(index);setDetailsOpen(true);}}><span>Details</span></button>{index<steps.length-1&&<ChevronRight size={15} className="workflow-connector" aria-hidden="true"/>}</li>;
    })}
   </ol>
   <p className="workflow-progress-note">{job.status==='Creating Files'&&artifacts.length?`${processed} of ${artifacts.length} files processed. `:''}Progress reflects completed workflow stages, not elapsed time.</p>
+  <div className="workflow-details-toolbar"><button className="text-button" aria-expanded={detailsOpen} aria-controls={'execution-details-'+job.id} onClick={()=>setDetailsOpen(value=>!value)}>{detailsOpen?'Hide backend execution':'Show backend execution'}</button>{inspected!==null&&<button className="text-button" onClick={()=>setInspected(null)}>Follow current agent</button>}</div>
+  {detailsOpen&&<div id={'execution-details-'+job.id}><p className="workflow-component-note">{isProposal?'RFP specialist agents and their backend operations are recorded below.':'Context and document building are worker steps. Solution architect is the model-generation step.'}</p><ExecutionDetails key={job.id} jobId={job.id} jobStatus={job.status} stages={detailStep?.statuses||steps.flatMap(step=>step.statuses)} label={detailStep?.name||'Workflow'}/></div>}
+
  </section>;
 }

@@ -12,6 +12,7 @@ from botocore.config import Config
 from .config import settings
 from .schemas import Solution
 from pydantic import ValidationError
+from .execution import emit
 
 log = logging.getLogger(__name__)
 
@@ -226,6 +227,22 @@ def demo(context):
 
 
 def _complete(system, payload_text):
+    started = time.monotonic()
+    try:
+        schema_name = json.loads(payload_text).get('schema', {}).get('title', 'Response')
+    except (ValueError, AttributeError, TypeError):
+        schema_name = 'Response'
+    emit('provider_request_started', 'Calling the configured model.', {'provider':settings.llm_provider,'model':settings.llm_model,'schema':schema_name,'max_output_tokens':settings.max_output_tokens})
+    try:
+        result = _request(system, payload_text)
+    except Exception as exc:
+        emit('provider_request_failed', 'Model request did not complete successfully.', {'duration_ms':int((time.monotonic()-started)*1000),'error_type':type(exc).__name__})
+        raise
+    emit('provider_request_finished', 'Model request finished.', {'duration_ms':int((time.monotonic()-started)*1000)})
+    return result
+
+
+def _request(system, payload_text):
     """Request structured output and reject provider-side truncation explicitly."""
     if settings.llm_provider == 'bedrock':
         if settings.aws_bearer_token_bedrock:
@@ -248,6 +265,8 @@ def _complete(system, payload_text):
             options['toolConfig'] = {'tools': [{'toolSpec': {'name': 'submit_result', 'description': 'Submit the complete response matching the provided JSON schema.', 'inputSchema': {'json': schema}}}], 'toolChoice': {'tool': {'name': 'submit_result'}}}
         result = client.converse(modelId=settings.llm_model, system=[{'text': system}], messages=[{'role': 'user', 'content': [{'text': payload_text}]}], inferenceConfig={'maxTokens': settings.max_output_tokens}, **options)
         reason = result.get('stopReason')
+        usage = result.get('usage', {})
+        emit('provider_response_received', 'Provider response received.', {'stop_reason':reason,'input_tokens':usage.get('inputTokens'),'output_tokens':usage.get('outputTokens'),'total_tokens':usage.get('totalTokens')})
         log.info('bedrock_response stop_reason=%s output_tokens=%s', reason, result.get('usage', {}).get('outputTokens'))
         if reason == 'max_tokens':
             raise OutputLimitError('The provider reached its output-token limit before completing the response.')
@@ -277,7 +296,10 @@ def _complete(system, payload_text):
         body = {'model': settings.llm_model, 'messages': [{'role': 'system', 'content': system}, {'role': 'user', 'content': payload_text}], 'response_format': {'type': 'json_object'}, 'max_completion_tokens': settings.max_output_tokens}
         response = httpx.post(url, headers=headers, json=body, timeout=httpx.Timeout(settings.llm_timeout, connect=10))
         response.raise_for_status()
-        choice = response.json()['choices'][0]
+        result = response.json()
+        choice = result['choices'][0]
+        usage = result.get('usage', {})
+        emit('provider_response_received', 'Provider response received.', {'stop_reason':choice.get('finish_reason'),'input_tokens':usage.get('prompt_tokens'),'output_tokens':usage.get('completion_tokens'),'total_tokens':usage.get('total_tokens')})
         if choice.get('finish_reason') == 'length':
             raise OutputLimitError('The provider reached its output-token limit before completing the response.')
         return choice['message']['content']
@@ -322,10 +344,12 @@ def structured(model, system, payload, validate=None):
         except (ValueError, KeyError, TypeError) as exc:
             last = f'Provider response did not match the {model.__name__} schema after validation and a targeted retry. Retry with a more concise request.'
             log.warning('provider_schema_validation_failed schema=%s attempt=%s', model.__name__, attempt + 1)
+            emit('schema_validation_failed', 'Agent output did not pass schema validation.', {'schema':model.__name__,'attempt':attempt+1})
             payload_text = serialize(retry_instruction(exc))
         except Exception:
             last = 'Provider request failed or timed out. Check endpoint, IAM permissions, model access and network connectivity.'
         if attempt == 0:
+            emit('provider_retry', 'Retrying the model request.', {'attempt':2})
             time.sleep(1)
     raise ProviderError(last)
 
@@ -381,9 +405,11 @@ def generate(context, repair=None):
         except (ValueError, KeyError, TypeError) as exc:
             last = 'Provider response did not match the solution schema after validation and a targeted retry. Retry with a more concise request.'
             log.warning('provider_schema_validation_failed schema=Solution attempt=%s', attempt + 1)
+            emit('schema_validation_failed', 'Solution output did not pass schema validation.', {'schema':'Solution','attempt':attempt+1})
             payload_text = solution_payload(context, retry_instruction(exc))
         except Exception:
             last = 'Provider request failed or timed out. Check endpoint, IAM permissions, model access and network connectivity.'
         if attempt == 0:
+            emit('provider_retry', 'Retrying the model request.', {'attempt':2})
             time.sleep(1)
     raise ProviderError(last)

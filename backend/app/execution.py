@@ -29,7 +29,7 @@ def actor(kind, stage):
             'Estimating': ('EstimationsAgent', 'app.agents.EstimationsAgent.run', 'Agent'),
             'Planning Resources': ('ResourcesAgent', 'app.agents.ResourcesAgent.run', 'Agent'),
             'Defining Methodology': ('DeliveryMethodologyAgent', 'app.agents.DeliveryMethodologyAgent.run', 'Agent'),
-            'Preparing Documents': ('DocumentsAgent', 'app.agents.DocumentsAgent.run', 'Agent'),
+            'Preparing Documents': ('ProposalCreatorAgent', 'app.agents.ProposalCreatorAgent.run', 'Agent'),
             'Creating Files': ('DocumentsAgent', 'app.worker.create_files', 'Agent'),
         }
     else:
@@ -110,5 +110,6 @@ def execution_view(db, job):
     agent, implementation, agent_type = actor(job.kind, job.status)
     return {'job_id':job.id,'status':job.status,'attempts':job.attempts,'created_at':utc(job.created_at),'updated_at':utc(job.updated_at),'server_time':now(),
             'current':{'agent':agent,'implementation':implementation,'agent_type':agent_type,'stage':job.status},
+            'handlers':[{'stage':stage,'agent':actor(job.kind,stage)[0],'implementation':actor(job.kind,stage)[1],'agent_type':actor(job.kind,stage)[2]} for stage in ['Queued','Building Context','Collecting Requirements','Planning Proposal','Generating Solution','Estimating','Planning Resources','Defining Methodology','Preparing Documents','Creating Files']],
             'provider':provider,'recorded':bool(events),'stages':stages,
             'activity':[{'id':e.id,'agent':e.agent,'implementation':e.implementation,'agent_type':e.agent_type,'stage':e.stage,'kind':e.kind,'message':e.message,'details':e.details,'created_at':utc(e.created_at)} for e in events]}

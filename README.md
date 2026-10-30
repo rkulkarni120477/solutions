@@ -74,6 +74,14 @@ The home page includes six sample prompts. Open **Prompts** in the left menu to 
 
 Demo accounts are generated per browser session. Clearing cookies loses access to that demo account. Use OIDC for durable enterprise identity.
 
+## Backend execution details
+
+The workflow panel includes a backend execution inspector. Click any workflow card to inspect its recorded component/class, implementation handler, stage start/end times and elapsed duration. The selected view shows model request starts/finishes, provider-reported token counts and stop reasons, validation retries, reference-selection counts, diagram checks and per-file export activity. **Follow current agent** resumes automatic selection; **All workflow activity** includes the other steps. The inspector refreshes while work is active and remains available after completion, failure or cancellation.
+
+Standard solutions use context/document worker components and a solution-generation LLM step; RFP workflows expose the actual specialist agent classes. Human approval and publication actions remain in the proposal's existing agent activity log. Operational events exclude prompts, document contents, model response bodies, credentials and hidden reasoning. Old jobs without recordings are clearly labelled; history and timings are not fabricated.
+
+Production upgrades must apply migration `0004` before starting workers. `GET /api/jobs/{id}/execution` enforces project ownership and returns up to 300 recent events plus recorded stage timings.
+
 ## Reset a running workflow
 
 Click **Reset** in the running workflow box to stop the current job and return to a blank **New solution** page. The project, references, previous versions and completed files remain available in My projects. The cancellation endpoint checks project ownership, is safe to repeat, and leaves already finished jobs unchanged. Cancelled jobs are terminal; unfinished files are marked Cancelled and can be explicitly retried. A cancelled RFP can also be retried from its project.
