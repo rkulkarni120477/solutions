@@ -49,14 +49,15 @@ try:
     v=detail['versions'][-1]
     failed=[a for a in v['artifacts'] if a['status']!='Completed']
     assert not failed, failed
-    assert v['context_sources'] and v['totals']['effort']['expected']==52
+    assert v['context_sources'] and v['totals']['effort']['expected']>0
+    rows=len(v['response']['estimates'])
     for artifact in v['artifacts']:
         url=request('POST',f'/api/artifacts/{artifact["id"]}/download-link').json()['url']
         data=request('GET',url).content
         ext=artifact['filename'].split('.')[-1]
         if ext=='docx':assert Document(io.BytesIO(data)).paragraphs
         elif ext=='pdf':assert len(PdfReader(io.BytesIO(data)).pages)>0
-        elif ext=='xlsx':assert load_workbook(io.BytesIO(data)).active['D9'].value=='=SUM(D4:D8)'
+        elif ext=='xlsx':assert load_workbook(io.BytesIO(data)).active[f'D{rows+4}'].value==f'=SUM(D4:D{rows+3})'
         elif ext=='pptx':
             presentation=Presentation(io.BytesIO(data))
             headings='\n'.join(shape.text for slide in presentation.slides for shape in slide.shapes if shape.has_text_frame)

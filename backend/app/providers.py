@@ -1,4 +1,7 @@
 import json
+import math
+import os
+import re
 import time
 import httpx
 import boto3
@@ -23,6 +26,107 @@ class ProviderError(Exception):
     pass
 
 
+_SCALE_UNITS = {'k': 1_000, 'thousand': 1_000, 'm': 1_000_000, 'million': 1_000_000}
+_INTEGRATIONS = ['sap', 'salesforce', 'dynamics', 'servicenow', 'workday', 'oracle', 'guidewire', 'erp', 'crm', 'mainframe',
+                 'payment', 'third-party', 'third party', 'legacy system', 'partner api', 'external api', 'sharepoint', 'teams']
+_COMPLIANCE = ['gdpr', 'hipaa', 'pci', 'soc 2', 'soc2', 'iso 27001', 'fedramp', 'sox', 'dpdp', 'data residency']
+_AI = [' ai ', 'ai search', 'llm', 'genai', 'generative', 'copilot', 'chatbot', 'machine learning', ' ml ', 'semantic search', 'rag', 'openai']
+_RESILIENCE = ['rto', 'rpo', 'disaster recovery', ' dr ', 'multi-region', 'high availability', '99.9', 'failover', 'active-active']
+_DATA = ['migrat', 'legacy', 'on-prem', 'on prem', 'data warehouse', 'etl']
+_ANALYTICS = ['report', 'dashboard', 'analytics', 'power bi', 'insight']
+
+
+_STEMS = {'migrat', 'report', 'dashboard', 'insight', 'payment', 'legacy system', 'on-prem', 'on prem', '99.9', 'failover'}
+
+
+def _found(text, words):
+    """Whole-word keyword matches; stems such as 'migrat' also match their inflections."""
+    found = []
+    for word in (w.strip() for w in words):
+        tail = '' if word in _STEMS else r'(?![a-z0-9])'
+        if re.search(r'(?<![a-z0-9])' + re.escape(word) + tail, text):
+            found.append(word)
+    return found
+
+
+def _user_scale(text):
+    """Largest stated user/volume figure, or None when the request never states one."""
+    best = None
+    pattern = r'(\d[\d,]*(?:\.\d+)?)\s*(k|m|thousand|million)?\s*(?:concurrent |active |daily |named |end |internal |external )?(?:users?|customers|employees|people|claims|transactions|requests|members|agents)\b'
+    for number, unit, in re.findall(pattern, text):
+        try:
+            value = float(number.replace(',', '')) * _SCALE_UNITS.get(unit or '', 1)
+        except ValueError:
+            continue
+        best = value if best is None else max(best, value)
+    return best
+
+
+def _demo_profile(context, outputs, cloud):
+    """Deterministic, request-sensitive estimates for demo mode so totals reflect the stated scope."""
+    parts = [context['current_prompt'], *[h.get('prompt', '') for h in context.get('history', [])], *context.get('approved_decisions', [])]
+    pref = context['preferences']
+    parts += [pref.get(k, '') for k in ('technologies', 'domain', 'scale', 'constraints', 'custom_deliverables')]
+    parts += [r.get('text', '')[:1500] for r in context.get('reference_passages', [])[:8]]
+    text = ' ' + ' '.join(' '.join(parts).lower().split()) + ' '
+    users = _user_scale(text)
+    integrations = _found(text, _INTEGRATIONS) + (['api integration'] if 'integrat' in text and not _found(text, _INTEGRATIONS) else [])
+    compliance, ai, resilience = _found(text, _COMPLIANCE), _found(text, _AI), _found(text, _RESILIENCE)
+    data, analytics = _found(text, _DATA), _found(text, _ANALYTICS)
+    features = len(re.findall(r'\b(?:must|shall|should|needs? to|required to|support)\b', text))
+    if users is None:
+        factor = 1.0
+    else:
+        factor = next(f for limit, f in [(10, 0.5), (100, 0.65), (1_000, 0.8), (10_000, 1.0), (100_000, 1.25), (float('inf'), 1.5)] if users <= limit)
+
+    def row(activity, role, base, dependency, scaled=True):
+        expected = max(1.0, round(base * (factor if scaled else 1) * 2) / 2)
+        return (activity, role, round(expected * 0.7 * 2) / 2, expected, round(expected * 1.5 * 2) / 2, dependency)
+
+    rows = [row('Discovery and architecture', 'Solution architect', 4 + min(features, 12) * 0.5, 'Stakeholder access', scaled=False),
+            row('Identity and platform foundation', 'Platform engineer', 6 + (3 if resilience else 0), 'Architecture approval'),
+            row('Core application and workflows', 'Full-stack engineer', 12 + min(features, 20) * 1.5, 'Identity and API contracts')]
+    if integrations:
+        rows.append(row(f'Integrations ({", ".join(dict.fromkeys(integrations))[:120]})', 'Integration engineer', 4 + 4 * len(set(integrations)), 'Partner API access and test environments'))
+    if data:
+        rows.append(row('Data migration and reconciliation', 'Data engineer', 10, 'Source data access and quality'))
+    if ai:
+        rows.append(row('Search and AI integration', 'AI engineer', 10, 'Reference corpus and model access'))
+    if analytics:
+        rows.append(row('Reporting and analytics', 'BI developer', 6, 'Agreed KPIs and data model'))
+    if resilience:
+        rows.append(row('Resilience and disaster recovery', 'Cloud engineer', 6, 'Agreed RTO/RPO targets'))
+    build = sum(r[3] for r in rows[1:])
+    rows.append(row('Security, testing and launch', 'QA / security engineer', max(5, build * 0.2) + 3 * len(compliance), 'Feature completion', scaled=False))
+
+    questions = []
+    if users is None:
+        questions.append('What are the expected user count, peak throughput and data retention period?')
+    if not compliance and 'identity' not in text and 'sso' not in text and 'entra' not in text:
+        questions.append('Which identity provider, compliance obligations, RTO and RPO apply?')
+    if not integrations and 'integrat' not in text and 'no integration' not in text:
+        questions.append('Which existing systems must the solution integrate with?')
+    contingency = min(30, 10 + 5 * len(questions))
+    total = sum(r[3] for r in rows) * (1 + contingency / 100)
+    fte = max(1, min(10, round(total / 30)))
+    weeks = max(2, math.ceil(total / fte / 5 * 1.25))
+    scale_text = f'about {users:,.0f} users' if users is not None else 'an unstated user volume'
+    assumptions = ['All architecture and effort values in demo mode are illustrative templates.',
+                   f'Sizing assumes {scale_text}; effort scales with the stated volume, integrations and compliance scope.',
+                   f'{fte} full-time contributor(s) are available; specialist time and dependencies require validation.', f'Target platform: {cloud}.']
+
+    diagrams = []
+    if 'diagrams' in outputs:
+        diagrams.append({'title': 'Logical solution architecture', 'kind': 'logical', 'source': 'flowchart LR\n  U[Solution architect] -->|HTTPS| W[Web workspace]\n  I[Enterprise identity] -->|OIDC| W\n  subgraph P[Application boundary]\n    W -->|Authorized requests| A[Workspace API]\n    A -->|Queue| Q[Durable jobs]\n    Q --> B[Generation worker]\n    A --> D[(Project database)]\n    B --> D\n    B --> S[(Private document store)]\n  end\n  B -->|Validated context| L[LLM provider]\n  B -->|Diagram definitions| R[Isolated renderer]'})
+        if integrations:
+            lines = [f'  A --> X{i}[{name.title()}]' for i, name in enumerate(list(dict.fromkeys(integrations))[:6])]
+            diagrams.append({'title': 'Integration view', 'kind': 'integration', 'source': 'flowchart LR\n  A[Integration layer]\n  C[Core application] -->|Events and APIs| A\n' + '\n'.join(lines)})
+        if resilience or (users or 0) > 10_000:
+            diagrams.append({'title': 'Deployment and resilience view', 'kind': 'deployment', 'source': 'flowchart LR\n  U[Users] --> G[Global load balancer]\n  G --> R1[Primary region]\n  G -.->|Failover| R2[Secondary region]\n  R1 --> D1[(Primary database)]\n  D1 -->|Replication| D2[(Replica database)]\n  R2 --> D2'})
+    duration = f'Indicative {weeks} calendar weeks with {fte} FTE and overlapping workstreams for {scale_text}; capacity floor is calculated separately. Validate dependencies and staffing.'
+    return {'rows': rows, 'questions': questions, 'contingency': contingency, 'fte': fte, 'assumptions': assumptions, 'diagrams': diagrams, 'duration': duration}
+
+
 def demo(context):
     pref = context['preferences']
     prompt = context['current_prompt']
@@ -32,6 +136,7 @@ def demo(context):
     cited = [r['id'] for r in refs[:4]]
     excerpt = '\n\n'.join(f"**{r['filename']} — {r['reference']}**\n\n{r['text'][:600]}" for r in refs[:4])
     outputs = pref.get('outputs', [])
+    profile = _demo_profile(context, outputs, cloud)
     return Solution.model_validate({
         'title': ' '.join(prompt.split())[:85],
         'summary': f'DEMO — illustrative template, not a live LLM response.\n\nThis workspace frames your request as a secure, modular solution on {cloud}. The starting design separates identity, application workflows, governed content and search. Validate the scope and sizing before delivery.\n\nYour request: {prompt[:1800]}',
@@ -43,13 +148,12 @@ def demo(context):
             {'title': 'Alternatives and risks', 'classification': 'requires validation', 'content': 'Managed search reduces operational effort but may increase recurring cost. Database full-text search is a simpler starting point for a small corpus. Choose after representative relevance and latency testing.\n\nKey risks include document quality, unclear authorization boundaries, provider limits and dependency lead times. Do not accept generated security or cost claims without review.'},
             {'title': 'Approved decisions and revision context', 'classification': 'supplied fact', 'content': '\n'.join(context['approved_decisions']) or 'No decisions approved yet. Prior version summaries included: ' + str(len(context['history']))},
         ],
-        'assumptions': ['All architecture and effort values in demo mode are illustrative templates.', 'Three full-time contributors are available; specialist time and dependencies require validation.', f'Target platform: {cloud}.'],
-        'questions': ['What are the expected user count, peak throughput and data retention period?', 'Which identity provider, compliance obligations, RTO and RPO apply?'],
-        'diagrams': [{'title': 'Logical solution architecture', 'kind': 'logical', 'source': 'flowchart LR\n  U[Solution architect] -->|HTTPS| W[Web workspace]\n  I[Enterprise identity] -->|OIDC| W\n  subgraph P[Application boundary]\n    W -->|Authorized requests| A[Workspace API]\n    A -->|Queue| Q[Durable jobs]\n    Q --> B[Generation worker]\n    A --> D[(Project database)]\n    B --> D\n    B --> S[(Private document store)]\n  end\n  B -->|Validated context| L[LLM provider]\n  B -->|Diagram definitions| R[Isolated renderer]'}] if 'diagrams' in outputs else [],
-        'estimates': [{'activity': a, 'role': r, 'low': low, 'expected': exp, 'high': high, 'rate': None, 'dependency': dep, 'confidence': 'low'} for a,r,low,exp,high,dep in [
-            ('Discovery and architecture', 'Solution architect', 4,6,9,'Stakeholder access'), ('Identity and platform foundation','Platform engineer',5,8,12,'Architecture approval'), ('Core application and workflows','Full-stack engineer',12,18,28,'Identity and API contracts'), ('Search and AI integration','AI engineer',6,10,16,'Reference corpus and model access'), ('Security, testing and launch','QA / security engineer',6,10,15,'Feature completion')]] if 'estimates' in outputs else [],
-        'effort_unit': 'person-days', 'currency': 'USD', 'contingency_percent': 15, 'staffing_fte': 3,
-        'duration_note': 'Illustrative 6–8 calendar weeks with overlapping workstreams; capacity floor is calculated separately. Validate dependencies and staffing.',
+        'assumptions': profile['assumptions'],
+        'questions': profile['questions'],
+        'diagrams': profile['diagrams'],
+        'estimates': [{'activity': a, 'role': r, 'low': low, 'expected': exp, 'high': high, 'rate': None, 'dependency': dep, 'confidence': 'low'} for a,r,low,exp,high,dep in profile['rows']] if 'estimates' in outputs else [],
+        'effort_unit': 'person-days', 'currency': 'USD', 'contingency_percent': profile['contingency'], 'staffing_fte': profile['fte'],
+        'duration_note': profile['duration'],
         'operating_cost_note': 'Not priced. Obtain current regional quotes for compute, database, storage, network, search and model usage; traffic and retention are unknown.',
         'exclusions': ['External license fees and cloud consumption', 'Legacy data remediation', 'Formal compliance certification'],
         'phases': [{'name': n, 'duration': d, 'activities': acts, 'dependencies': dep} for n,d,acts,dep in [
@@ -64,6 +168,9 @@ def demo(context):
 def _complete(system, payload_text):
     """Send one JSON-mode request to the configured provider and return raw text."""
     if settings.llm_provider == 'bedrock':
+        if settings.aws_bearer_token_bedrock:
+            # botocore reads Bedrock API keys only from the process environment.
+            os.environ.setdefault('AWS_BEARER_TOKEN_BEDROCK', settings.aws_bearer_token_bedrock)
         client = boto3.client('bedrock-runtime', region_name=settings.aws_region,
                               aws_access_key_id=settings.aws_access_key_id, aws_secret_access_key=settings.aws_secret_access_key,
                               aws_session_token=settings.aws_session_token,

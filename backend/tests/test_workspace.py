@@ -90,6 +90,17 @@ def test_estimate_decimal_totals_costs_and_validation():
     with pytest.raises(ValidationError):Estimate(activity='NaN',role='SA',low=float('nan'),expected=2,high=4)
 
 
+def test_demo_estimates_reflect_request_scope():
+    def run(prompt):
+        s=demo({'preferences':Preferences().model_dump(),'current_prompt':prompt,'approved_decisions':[],'history':[],'reference_passages':[]})
+        return s,calculate(s)['with_contingency']['expected']
+    small,small_total=run('Internal tool for 1 user only. No data retention. Provider AWS with Entra ID SSO.')
+    large,large_total=run('Migrate on-prem claims platform for 50,000 concurrent users. Must integrate with SAP and Salesforce. GDPR, RTO 1h, multi-region.')
+    assert small_total<large_total
+    assert len(large.estimates)>len(small.estimates) and len(large.diagrams)>len(small.diagrams)
+    assert small.staffing_fte<=large.staffing_fte and not large.questions
+
+
 @pytest.mark.parametrize('kind',['docx','pdf','xlsx','pptx'])
 def test_real_artifact_formats(kind):
     s=sample_solution()
@@ -102,7 +113,8 @@ def test_real_artifact_formats(kind):
         wb=load_workbook(io.BytesIO(data));ws=wb.active
         assert ws['A4'].value.startswith("'=") and ws['A4'].data_type=='s'
         assert ws['G4'].value=='=IF(F4="","",D4*F4)'
-        assert ws['D9'].value=='=SUM(D4:D8)'
+        end=3+len(s.estimates)
+        assert ws[f'D{end+1}'].value==f'=SUM(D4:D{end})'
     elif kind=='pptx':assert len(Presentation(io.BytesIO(data)).slides)>5
 
 

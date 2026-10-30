@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     aws_access_key_id: str | None = None
     aws_secret_access_key: str | None = None
     aws_session_token: str | None = None
+    aws_bearer_token_bedrock: str | None = None
     session_secret: str = 'development-only-change-this-before-deployment'
     secure_cookies: bool = False
     public_url: str = 'http://localhost:5173'

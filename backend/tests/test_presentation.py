@@ -39,7 +39,8 @@ def test_briefing_coverage_native_estimates_costs_and_bounds():
         assert phrase in text
     totals = calculate(s)
     assert f"USD {totals['implementation_cost']['expected']:,.0f}" in text
-    assert '59.8' in text
+    expected = totals['with_contingency']['expected']
+    assert f'{expected:,.2f}'.rstrip('0').rstrip('.') in text
     tables = [shape.table for slide in prs.slides for shape in slide.shapes if shape.has_table]
     assert any(table.cell(0, 0).text == 'Activity' and table.cell(0, 3).text == 'Expected' for table in tables)
     charts = [shape.chart for slide in prs.slides for shape in slide.shapes if shape.has_chart]
