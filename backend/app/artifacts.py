@@ -16,7 +16,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as PDFImage
 from .config import settings
 from .schemas import Solution, calculate
-from .db import Artifact
+from .db import Artifact, Proposal
 from .storage import storage
 from .presentation import create_presentation
 
@@ -24,23 +24,31 @@ from .presentation import create_presentation
 MIMES = {'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'pdf': 'application/pdf', 'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation', 'zip': 'application/zip', 'svg': 'image/svg+xml', 'png': 'image/png', 'jpg': 'image/jpeg', 'mmd': 'text/plain'}
 
 
-def plan_artifacts(db, version):
+def plan_artifacts(db, version, documents=None):
+    """Plan files for a version. `documents` is the explicit proposal format selection."""
     outputs = version.preferences.get('outputs', [])
-    # A stakeholder briefing is a standard part of every response package.
-    kinds = ['pptx']
-    if 'solution' in outputs:
-        kinds += ['docx', 'pdf']
-    if 'estimates' in outputs:
-        kinds += ['xlsx']
     solution = Solution.model_validate(version.response)
+    if documents is None:
+        # A stakeholder briefing is a standard part of every response package.
+        kinds = ['pptx']
+        if 'solution' in outputs:
+            kinds += ['docx', 'pdf']
+        if 'estimates' in outputs:
+            kinds += ['xlsx']
+    else:
+        kinds = [k for k in ['docx', 'pptx'] if k in documents]
+        if solution.estimates:
+            kinds += ['xlsx']
     for i, _ in enumerate(solution.diagrams):
         kinds += [f'diagram:{i}:{ext}' for ext in ['mmd', 'svg', 'png', 'jpg']]
     if kinds:
         kinds += ['zip']
+    names = {'pptx': f'proposal-presentation-v{version.number}.pptx', 'docx': f'proposal-v{version.number}.docx',
+             'xlsx': f'proposal-estimates-v{version.number}.xlsx', 'zip': f'proposal-package-v{version.number}.zip'} if documents is not None else {'pptx': f'project-briefing-v{version.number}.pptx'}
     result = []
     for kind in kinds:
         parts = kind.split(':')
-        name = f'architecture-{int(parts[1])+1}.{parts[2]}' if len(parts) == 3 else f'project-briefing-v{version.number}.pptx' if kind == 'pptx' else f'solution-v{version.number}.{kind}'
+        name = f'architecture-{int(parts[1])+1}.{parts[2]}' if len(parts) == 3 else names.get(kind, f'solution-v{version.number}.{kind}')
         a = Artifact(project_id=version.project_id, version_id=version.id, kind=kind, filename=name)
         db.add(a)
         result.append(a)
@@ -69,6 +77,11 @@ def text_blocks(s):
     yield 'Assumptions', '\n'.join(s.assumptions)
     yield 'Open questions', '\n'.join(s.questions)
     yield 'Delivery plan', '\n\n'.join(f'{p.name} — {p.duration}\n' + '\n'.join(p.activities) + '\nDependencies: ' + p.dependencies for p in s.phases)
+    if s.methodology:
+        m = s.methodology
+        yield f'Delivery methodology: {m.name}', m.overview + ''.join(f'\n\n{label}\n' + '\n'.join(items) for label, items in [('Ceremonies', m.ceremonies), ('Governance', m.governance), ('Quality gates', m.quality_gates)] if items)
+    if s.resources:
+        yield 'Team and resources', '\n'.join(f'{r.role}: {r.count:g} ({r.allocation}) — {r.responsibilities}' for r in s.resources)
     yield 'Estimate basis', f'Unit: {s.effort_unit}. Currency: {s.currency}. Contingency: {s.contingency_percent}%. Staffing: {s.staffing_fte} FTE.\n{s.duration_note}\nOperating cost: {s.operating_cost_note}\nExclusions: ' + '; '.join(s.exclusions)
     yield 'Calculated estimate totals', json.dumps(calculate(s), indent=2)
 
@@ -87,6 +100,8 @@ def create_document(kind, solution, provider, diagrams=None, metadata=None):
         style.font.size = Pt(10)
         doc.add_heading(s.title, 0)
         doc.add_paragraph(label)
+        if metadata and metadata.get('proposal'):
+            doc.add_paragraph('RFP proposal response prepared by the presales agent workflow for human review and approval.')
         for heading, text in text_blocks(s):
             doc.add_heading(heading, level=1)
             for paragraph in text.split('\n\n'):
@@ -102,6 +117,15 @@ def create_document(kind, solution, provider, diagrams=None, metadata=None):
             for row in s.estimates:
                 for cell, value in zip(table.add_row().cells, [row.activity, row.role, row.low, row.expected, row.high]):
                     cell.text = str(value)
+        if s.resources:
+            doc.add_heading('Proposed team', 1)
+            team = doc.add_table(rows=1, cols=4)
+            team.style = 'Light Shading Accent 1'
+            for cell, value in zip(team.rows[0].cells, ['Role', 'Count', 'Allocation', 'Effort (person-days)']):
+                cell.text = value
+            for r in s.resources:
+                for cell, value in zip(team.add_row().cells, [r.role, f'{r.count:g}', r.allocation, f'{r.effort_days:g}']):
+                    cell.text = value
         doc.sections[0].footer.paragraphs[0].text = 'Solution Architect Workspace • Review before implementation'
         doc.save(buffer)
     elif kind == 'pdf':
@@ -193,4 +217,7 @@ def build_artifact(db, artifact, version, cache):
         if a.status == 'Completed' and a.kind.endswith(':png') and a.key:
             idx = int(a.kind.split(':')[1])
             diagrams.append((s.diagrams[idx].title, storage.get(a.key)))
-    return create_document(artifact.kind, s, version.provider, diagrams, {'project_id': version.project_id, 'version': version.number, 'created_at': version.created_at.isoformat()})
+    meta = {'project_id': version.project_id, 'version': version.number, 'created_at': version.created_at.isoformat()}
+    if db.query(Proposal.id).filter(Proposal.draft_version_id == version.id).first():
+        meta['proposal'] = True
+    return create_document(artifact.kind, s, version.provider, diagrams, meta)

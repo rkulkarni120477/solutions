@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import create_engine, String, Text, JSON, ForeignKey, DateTime, Integer, UniqueConstraint, event
+from sqlalchemy import create_engine, String, Text, JSON, ForeignKey, DateTime, Integer, Boolean, UniqueConstraint, event
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from .config import settings
 
@@ -63,7 +63,9 @@ class Job(Base):
     __tablename__ = 'jobs'
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     project_id: Mapped[str] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), index=True)
-    version_id: Mapped[str] = mapped_column(ForeignKey('versions.id', ondelete='CASCADE'))
+    # Proposal requirement-collection jobs run before a draft version exists.
+    version_id: Mapped[str | None] = mapped_column(ForeignKey('versions.id', ondelete='CASCADE'), nullable=True)
+    proposal_id: Mapped[str | None] = mapped_column(ForeignKey('proposals.id', ondelete='CASCADE'), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(40), default='Queued', index=True)
     kind: Mapped[str] = mapped_column(String(40), default='solution')
     artifact_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
@@ -83,6 +85,54 @@ class Artifact(Base):
     status: Mapped[str] = mapped_column(String(30), default='Queued')
     key: Mapped[str | None] = mapped_column(String(500), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class Proposal(Base):
+    """Presales RFP response workflow, including the human approval gate."""
+    __tablename__ = 'proposals'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    project_id: Mapped[str] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), index=True)
+    request: Mapped[str] = mapped_column(Text)
+    formats: Mapped[list] = mapped_column(JSON, default=list)
+    preferences: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(40), default='Queued')
+    requirements: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    answers: Mapped[dict] = mapped_column(JSON, default=dict)
+    assumptions_accepted: Mapped[bool] = mapped_column(Boolean, default=False)
+    plan: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    draft_version_id: Mapped[str | None] = mapped_column(ForeignKey('versions.id', ondelete='SET NULL'), nullable=True)
+    reviews: Mapped[list] = mapped_column(JSON, default=list)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    approved_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class AgentMessage(Base):
+    __tablename__ = 'agent_messages'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    proposal_id: Mapped[str] = mapped_column(ForeignKey('proposals.id', ondelete='CASCADE'), index=True)
+    agent: Mapped[str] = mapped_column(String(60))
+    recipient: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    kind: Mapped[str] = mapped_column(String(30))
+    content: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ResponseDocument(Base):
+    """Immutable copy of an approved proposal deliverable."""
+    __tablename__ = 'response_documents'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    project_id: Mapped[str] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), index=True)
+    proposal_id: Mapped[str] = mapped_column(ForeignKey('proposals.id', ondelete='CASCADE'), index=True)
+    version_id: Mapped[str] = mapped_column(String(36))
+    kind: Mapped[str] = mapped_column(String(40))
+    filename: Mapped[str] = mapped_column(String(200))
+    key: Mapped[str] = mapped_column(String(500))
+    size: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
 class Audit(Base):

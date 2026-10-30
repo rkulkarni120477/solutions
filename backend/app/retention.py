@@ -2,7 +2,7 @@
 from datetime import timedelta
 from sqlalchemy import select, delete
 from .config import settings
-from .db import Session, Project, Attachment, Artifact, Job, Audit, now
+from .db import Session, Project, Attachment, Artifact, Job, Audit, ResponseDocument, now
 from .worker import ACTIVE
 from .storage import storage
 
@@ -19,6 +19,8 @@ def cleanup():
             for a in db.scalars(select(Artifact).where(Artifact.project_id == project.id)):
                 if a.key:
                     storage.delete(a.key)
+            for d in db.scalars(select(ResponseDocument).where(ResponseDocument.project_id == project.id)):
+                storage.delete(d.key)
             db.add(Audit(user_id=project.owner_id, action='retention_deleted', resource_id=project.id))
             db.delete(project)
             count += 1

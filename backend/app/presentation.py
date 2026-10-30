@@ -195,9 +195,10 @@ def number(value):
 def create_presentation(solution: Solution, provider: str, diagrams=None, metadata=None):
     deck = Briefing(solution, provider, metadata)
     s, totals = solution, calculate(solution)
-    cover = deck.slide('Project solution briefing', dark=True)
+    proposal = bool(deck.metadata.get('proposal'))
+    cover = deck.slide('RFP proposal response' if proposal else 'Project solution briefing', dark=True)
     deck.text(cover, s.title, .72, 2.1, 11.9, 2.45, 32 if len(s.title) < 95 else 28, WHITE, True)
-    deck.text(cover, 'Executive summary, solution design, estimates and delivery', .74, 4.75, 11.8, .6, 18, 'BDCEE3')
+    deck.text(cover, 'Solution, estimates, team, methodology and delivery' if proposal else 'Executive summary, solution design, estimates and delivery', .74, 4.75, 11.8, .6, 18, 'BDCEE3')
     info = []
     if deck.metadata.get('version') is not None:
         info.append(f"Response version {deck.metadata['version']}")
@@ -335,6 +336,11 @@ def create_presentation(solution: Solution, provider: str, diagrams=None, metada
         deck.narrative('Delivery duration and staffing', s.duration_note or 'Delivery duration requires validation.', f'Staffing assumption: {number(s.staffing_fte)} FTE. Effort and elapsed duration are different measures.')
     else:
         deck.narrative('Delivery plan', 'No implementation plan was requested or provided. Select Implementation plan for a new response to populate delivery phases and dependencies.')
+    if s.methodology:
+        m = s.methodology
+        deck.narrative(f'Delivery methodology: {m.name}', m.overview + ''.join(f'\n\n{label}\n\n' + '\n\n'.join(items) for label, items in [('Ceremonies', m.ceremonies), ('Governance', m.governance), ('Quality gates', m.quality_gates)] if items), 'How the engagement will be delivered and governed')
+    if s.resources:
+        deck.table('Proposed team', ['Role', 'Count', 'Allocation', 'Responsibilities'], [[r.role, number(r.count), r.allocation, r.responsibilities] for r in s.resources], [2.8, 1.1, 2.7, 5.35], f'Team sized from the estimate. Staffing assumption: {number(s.staffing_fte)} FTE.', per_page=5)
     deck.narrative('Assumptions for review', '\n\n'.join(s.assumptions) or 'No assumptions were recorded in the response.', 'Confirm assumptions before approving scope or estimates')
     deck.narrative('Open questions and decisions', '\n\n'.join(s.questions) or 'No unresolved questions were recorded. Architect approval is still required.', 'Outstanding inputs for project stakeholders')
     closing = deck.slide('Project review and next steps', dark=True)

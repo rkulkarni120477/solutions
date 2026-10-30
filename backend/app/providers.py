@@ -61,6 +61,65 @@ def demo(context):
     })
 
 
+def _complete(system, payload_text):
+    """Send one JSON-mode request to the configured provider and return raw text."""
+    if settings.llm_provider == 'bedrock':
+        client = boto3.client('bedrock-runtime', region_name=settings.aws_region,
+                              aws_access_key_id=settings.aws_access_key_id, aws_secret_access_key=settings.aws_secret_access_key,
+                              aws_session_token=settings.aws_session_token,
+                              config=Config(connect_timeout=10, read_timeout=settings.llm_timeout, retries={'max_attempts': 1}))
+        result = client.converse(modelId=settings.llm_model, system=[{'text': system}], messages=[{'role': 'user', 'content': [{'text': payload_text}]}], inferenceConfig={'maxTokens': settings.max_output_tokens})
+        return ''.join(c.get('text', '') for c in result['output']['message']['content'])
+    else:
+        if settings.llm_provider == 'openai':
+            url = 'https://api.openai.com/v1/chat/completions'
+            headers = {'Authorization': f'Bearer {settings.openai_api_key}'}
+            if not settings.openai_api_key:
+                raise ProviderError('OpenAI credentials are missing. Configure OPENAI_API_KEY or select demo mode.')
+        elif settings.llm_provider == 'azure':
+            if not settings.azure_openai_api_key or not settings.azure_openai_endpoint.startswith('https://'):
+                raise ProviderError('Configure the Azure OpenAI HTTPS endpoint and API key.')
+            from urllib.parse import quote
+            url = f'{settings.azure_openai_endpoint.rstrip("/")}/openai/deployments/{quote(settings.llm_model, safe="")}/chat/completions?api-version={settings.azure_openai_api_version}'
+            headers = {'api-key': settings.azure_openai_api_key}
+        else:
+            raise ProviderError('Unknown LLM_PROVIDER. Choose demo, openai, azure or bedrock.')
+        body = {'model': settings.llm_model, 'messages': [{'role': 'system', 'content': system}, {'role': 'user', 'content': payload_text}], 'response_format': {'type': 'json_object'}, 'max_completion_tokens': settings.max_output_tokens}
+        response = httpx.post(url, headers=headers, json=body, timeout=httpx.Timeout(settings.llm_timeout, connect=10))
+        response.raise_for_status()
+        return response.json()['choices'][0]['message']['content']
+
+
+def structured(model, system, payload, validate=None):
+    """Request a schema-valid agent result. Retries once on transient or schema errors."""
+    if not settings.llm_model:
+        raise ProviderError('Configure LLM_MODEL with a supported model, deployment name or inference profile ID.')
+    schema = model.model_json_schema()
+    payload_text = json.dumps({'schema': schema, 'input': payload}, ensure_ascii=False, default=str)
+    if len((system + payload_text).encode('utf-8')) > settings.max_input_tokens:
+        raise ProviderError('Agent context exceeds the conservative input-token budget. Shorten the request, remove references or increase MAX_INPUT_TOKENS within your model limits.')
+    last = None
+    for attempt in range(2):
+        try:
+            result = model.model_validate_json(_complete(system, payload_text))
+            return validate(result) if validate else result
+        except ProviderError:
+            raise
+        except httpx.HTTPStatusError as exc:
+            code = exc.response.status_code
+            if code not in [429, 500, 502, 503, 504]:
+                raise ProviderError(f'Provider returned HTTP {code}. Check model/deployment, credentials and account access.') from None
+            last = f'Provider returned HTTP {code}. Check quota and retry shortly.'
+        except (ValueError, KeyError, TypeError):
+            last = f'Provider response did not match the {model.__name__} schema. Retry or select a model with JSON output support.'
+            payload_text = json.dumps({'schema': schema, 'input': payload, 'repair': 'Previous response failed validation. Return complete schema-valid JSON only.'}, ensure_ascii=False, default=str)
+        except Exception:
+            last = 'Provider request failed or timed out. Check endpoint, IAM permissions, model access and network connectivity.'
+        if attempt == 0:
+            time.sleep(1)
+    raise ProviderError(last)
+
+
 def generate(context, repair=None):
     if settings.llm_provider == 'demo':
         return demo(context)
@@ -73,31 +132,7 @@ def generate(context, repair=None):
     last = None
     for attempt in range(2):
         try:
-            if settings.llm_provider == 'bedrock':
-                client = boto3.client('bedrock-runtime', region_name=settings.aws_region,
-                                      aws_access_key_id=settings.aws_access_key_id, aws_secret_access_key=settings.aws_secret_access_key,
-                                      aws_session_token=settings.aws_session_token,
-                                      config=Config(connect_timeout=10, read_timeout=settings.llm_timeout, retries={'max_attempts': 1}))
-                result = client.converse(modelId=settings.llm_model, system=[{'text': SYSTEM}], messages=[{'role': 'user', 'content': [{'text': payload_text}]}], inferenceConfig={'maxTokens': settings.max_output_tokens})
-                text = ''.join(c.get('text', '') for c in result['output']['message']['content'])
-            else:
-                if settings.llm_provider == 'openai':
-                    url = 'https://api.openai.com/v1/chat/completions'
-                    headers = {'Authorization': f'Bearer {settings.openai_api_key}'}
-                    if not settings.openai_api_key:
-                        raise ProviderError('OpenAI credentials are missing. Configure OPENAI_API_KEY or select demo mode.')
-                elif settings.llm_provider == 'azure':
-                    if not settings.azure_openai_api_key or not settings.azure_openai_endpoint.startswith('https://'):
-                        raise ProviderError('Configure the Azure OpenAI HTTPS endpoint and API key.')
-                    from urllib.parse import quote
-                    url = f'{settings.azure_openai_endpoint.rstrip("/")}/openai/deployments/{quote(settings.llm_model, safe="")}/chat/completions?api-version={settings.azure_openai_api_version}'
-                    headers = {'api-key': settings.azure_openai_api_key}
-                else:
-                    raise ProviderError('Unknown LLM_PROVIDER. Choose demo, openai, azure or bedrock.')
-                body = {'model': settings.llm_model, 'messages': [{'role': 'system', 'content': SYSTEM}, {'role': 'user', 'content': payload_text}], 'response_format': {'type': 'json_object'}, 'max_completion_tokens': settings.max_output_tokens}
-                response = httpx.post(url, headers=headers, json=body, timeout=httpx.Timeout(settings.llm_timeout, connect=10))
-                response.raise_for_status()
-                text = response.json()['choices'][0]['message']['content']
+            text = _complete(SYSTEM, payload_text)
             solution = Solution.model_validate_json(text)
             allowed = {p['id'] for p in context['reference_passages']}
             if any(source not in allowed for section in solution.sections for source in section.sources):

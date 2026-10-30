@@ -4,15 +4,16 @@ import threading
 import time
 from datetime import timedelta
 from sqlalchemy import select, update
-from .db import Session, Job, Version, Project, Attachment, Artifact, now
+from .db import Session, Job, Version, Project, Attachment, Artifact, Proposal, now
 from .context import build_context
 from .providers import generate, ProviderError
 from .artifacts import plan_artifacts, build_artifact, MIMES, render_diagram
 from .storage import storage
 from .config import settings
+from . import agents
 
 log = logging.getLogger(__name__)
-ACTIVE = ['Building Context', 'Generating Solution', 'Creating Files']
+ACTIVE = ['Building Context', 'Generating Solution', 'Creating Files', *agents.STAGES]
 
 
 def stage(db, job, status):
@@ -21,11 +22,87 @@ def stage(db, job, status):
     db.commit()
 
 
+def validate_diagrams(db, job, context, solution):
+    """Validate/repair diagrams once before publishing narrative. Renderer outages leave
+    exports independently failed rather than discarding a successful solution."""
+    for diagram in solution.diagrams:
+        job.updated_at = now()
+        db.commit()
+        try:
+            render_diagram(diagram.source)
+        except Exception:
+            if settings.llm_provider != 'demo':
+                try:
+                    fixed = generate(context, {'instruction': 'A diagram failed validation. Repair Mermaid syntax using safe plain-text flowchart or sequenceDiagram syntax.', 'source': diagram.source})
+                    candidate = next((d for d in fixed.diagrams if d.kind == diagram.kind), None)
+                    if candidate:
+                        render_diagram(candidate.source)
+                        diagram.source = candidate.source
+                except Exception:
+                    pass
+
+
+def create_files(db, job, project, version, documents=None):
+    stage(db, job, 'Creating Files')
+    artifacts = db.query(Artifact).filter_by(version_id=version.id).all()
+    if not artifacts:
+        artifacts = plan_artifacts(db, version, documents)
+    selected = [a for a in artifacts if a.id == job.artifact_id] if job.artifact_id else [a for a in artifacts if a.status != 'Completed']
+    # Render diagrams before document embeds; package ZIP last.
+    selected.sort(key=lambda a: (2 if a.kind == 'zip' else 0 if a.kind.startswith('diagram:') else 1, a.kind))
+    cache = {}
+    for artifact in selected:
+        artifact.status = 'Creating Files'
+        artifact.error = None
+        job.updated_at = now()
+        db.commit()
+        try:
+            data = build_artifact(db, artifact, version, cache)
+            ext = artifact.filename.rsplit('.', 1)[-1]
+            key = f'{project.id}/{version.id}/{artifact.id}/{artifact.filename}'
+            storage.put(key, data, MIMES.get(ext, 'application/octet-stream'))
+            artifact.key = key
+            artifact.status = 'Completed'
+        except Exception:
+            log.warning('artifact_generation_failed artifact_id=%s kind=%s', artifact.id, artifact.kind)
+            artifact.status = 'Failed'
+            artifact.error = 'Could not create this file. Check the renderer/storage service and supported diagram syntax, then retry this artifact.'
+        db.commit()
+    # A retried artifact changes the package snapshot: rebuild existing ZIP.
+    if job.artifact_id and any(a.id == job.artifact_id and a.kind != 'zip' and a.status == 'Completed' for a in artifacts):
+        for package in artifacts:
+            if package.kind == 'zip':
+                try:
+                    data = build_artifact(db, package, version, cache)
+                    key = package.key or f'{project.id}/{version.id}/{package.id}/{package.filename}'
+                    storage.put(key, data, MIMES['zip'])
+                    package.key, package.status, package.error = key, 'Completed', None
+                except Exception:
+                    package.status, package.error = 'Failed', 'Package refresh failed. Retry the ZIP artifact.'
+                db.commit()
+    failures = db.query(Artifact).filter_by(version_id=version.id, status='Failed').count()
+    job.error = f'{failures} file(s) failed. Successful results are preserved; retry individual files.' if failures else None
+    return failures
+
+
 def process(job_id):
     with Session() as db:
         job = db.get(Job, job_id)
-        version = db.get(Version, job.version_id)
         project = db.get(Project, job.project_id)
+        if job.kind == 'proposal':
+            try:
+                agents.run(db, job, project, stage=stage, validate_diagrams=validate_diagrams, create_files=create_files)
+            except Exception as exc:
+                db.rollback()
+                job = db.get(Job, job_id)
+                job.error = str(exc) if isinstance(exc, (ProviderError, ValueError)) else 'Proposal workflow failed. Check database, storage and provider configuration, then retry.'
+                proposal = db.get(Proposal, job.proposal_id)
+                if proposal:
+                    proposal.status, proposal.error, proposal.updated_at = 'Failed', job.error, now()
+                    agents.AgentBus(db, proposal).send('ProposalCreator', None, 'error', job.error)
+                stage(db, job, 'Failed')
+            return
+        version = db.get(Version, job.version_id)
         try:
             if job.kind == 'solution' and not version.response:
                 stage(db, job, 'Building Context')
@@ -35,64 +112,10 @@ def process(job_id):
                 version.context_sources = [{'id':r['id'], 'filename':r['filename'], 'reference':r['reference']} for r in context['reference_passages']]
                 stage(db, job, 'Generating Solution')
                 solution = generate(context)
-                # Validate/repair diagrams once before publishing narrative. Renderer outages leave
-                # exports independently failed rather than discarding a successful solution.
-                for diagram in solution.diagrams:
-                    job.updated_at = now()
-                    db.commit()
-                    try:
-                        render_diagram(diagram.source)
-                    except Exception:
-                        if settings.llm_provider != 'demo':
-                            try:
-                                fixed = generate(context, {'instruction': 'A diagram failed validation. Repair Mermaid syntax using safe plain-text flowchart or sequenceDiagram syntax.', 'source': diagram.source})
-                                candidate = next((d for d in fixed.diagrams if d.kind == diagram.kind), None)
-                                if candidate:
-                                    render_diagram(candidate.source)
-                                    diagram.source = candidate.source
-                            except Exception:
-                                pass
+                validate_diagrams(db, job, context, solution)
                 version.response = solution.model_dump()
                 db.commit()
-            stage(db, job, 'Creating Files')
-            artifacts = db.query(Artifact).filter_by(version_id=version.id).all()
-            if not artifacts:
-                artifacts = plan_artifacts(db, version)
-            selected = [a for a in artifacts if a.id == job.artifact_id] if job.artifact_id else [a for a in artifacts if a.status != 'Completed']
-            # Render diagrams before document embeds; package ZIP last.
-            selected.sort(key=lambda a: (2 if a.kind == 'zip' else 0 if a.kind.startswith('diagram:') else 1, a.kind))
-            cache = {}
-            for artifact in selected:
-                artifact.status = 'Creating Files'
-                artifact.error = None
-                job.updated_at = now()
-                db.commit()
-                try:
-                    data = build_artifact(db, artifact, version, cache)
-                    ext = artifact.filename.rsplit('.', 1)[-1]
-                    key = f'{project.id}/{version.id}/{artifact.id}/{artifact.filename}'
-                    storage.put(key, data, MIMES.get(ext, 'application/octet-stream'))
-                    artifact.key = key
-                    artifact.status = 'Completed'
-                except Exception:
-                    log.warning('artifact_generation_failed artifact_id=%s kind=%s', artifact.id, artifact.kind)
-                    artifact.status = 'Failed'
-                    artifact.error = 'Could not create this file. Check the renderer/storage service and supported diagram syntax, then retry this artifact.'
-                db.commit()
-            # A retried artifact changes the package snapshot: rebuild existing ZIP.
-            if job.artifact_id and any(a.id == job.artifact_id and a.kind != 'zip' and a.status == 'Completed' for a in artifacts):
-                for package in artifacts:
-                    if package.kind == 'zip':
-                        try:
-                            data = build_artifact(db, package, version, cache)
-                            key = package.key or f'{project.id}/{version.id}/{package.id}/{package.filename}'
-                            storage.put(key, data, MIMES['zip'])
-                            package.key, package.status, package.error = key, 'Completed', None
-                        except Exception:
-                            package.status, package.error = 'Failed', 'Package refresh failed. Retry the ZIP artifact.'
-                        db.commit()
-            failures = db.query(Artifact).filter_by(version_id=version.id, status='Failed').count()
-            job.error = f'{failures} file(s) failed. Successful results are preserved; retry individual files.' if failures else None
+            create_files(db, job, project, version)
             stage(db, job, 'Completed')
         except Exception as exc:
             db.rollback()
@@ -111,7 +134,12 @@ def run_once():
             old.status = 'Failed'
             old.error = 'Worker stopped or exceeded its lease. Saved results are preserved. Retry the failed file or regenerate.'
             old.updated_at = now()
-            db.execute(update(Artifact).where(Artifact.version_id == old.version_id, Artifact.status.in_(['Queued','Creating Files'])).values(status='Failed', error='Worker stopped during file generation. Retry this artifact.'))
+            if old.version_id:
+                db.execute(update(Artifact).where(Artifact.version_id == old.version_id, Artifact.status.in_(['Queued','Creating Files'])).values(status='Failed', error='Worker stopped during file generation. Retry this artifact.'))
+            if old.proposal_id:
+                proposal = db.get(Proposal, old.proposal_id)
+                if proposal and proposal.status not in ('Live', 'Approved'):
+                    proposal.status, proposal.error, proposal.updated_at = 'Failed', old.error, now()
         db.commit()
         candidate = db.scalar(select(Job).where(Job.status == 'Queued').order_by(Job.created_at).with_for_update(skip_locked=True).limit(1))
         if not candidate:

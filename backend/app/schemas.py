@@ -60,6 +60,22 @@ class Phase(Strict):
     dependencies: str = Field(max_length=1000)
 
 
+class ResourceRole(Strict):
+    role: str = Field(min_length=1, max_length=150)
+    count: float = Field(ge=0, le=1000)
+    allocation: str = Field(default='', max_length=200)
+    responsibilities: str = Field(default='', max_length=1000)
+    effort_days: float = Field(default=0, ge=0, le=100000)
+
+
+class Methodology(Strict):
+    name: str = Field(max_length=150)
+    overview: str = Field(max_length=4000)
+    ceremonies: list[str] = Field(default_factory=list, max_length=20)
+    governance: list[str] = Field(default_factory=list, max_length=20)
+    quality_gates: list[str] = Field(default_factory=list, max_length=20)
+
+
 class Solution(Strict):
     title: str = Field(max_length=150)
     summary: str = Field(max_length=8000)
@@ -77,6 +93,96 @@ class Solution(Strict):
     exclusions: list[str] = Field(max_length=30)
     phases: list[Phase] = Field(max_length=20)
     artifact_requests: list[Literal['docx', 'pdf', 'xlsx', 'pptx', 'zip']] = Field(max_length=5)
+    # Populated by the presales Resources and DeliveryMethodology agents.
+    resources: list[ResourceRole] = Field(default_factory=list, max_length=40)
+    methodology: Methodology | None = None
+
+
+ProposalFormat = Literal['docx', 'pptx']
+
+
+class ProposalCreate(Strict):
+    request: str = Field(min_length=20, max_length=16000)
+    formats: list[ProposalFormat] = Field(default_factory=list, max_length=2)
+    preferences: Preferences = Field(default_factory=Preferences)
+
+
+class ProposalAnswers(Strict):
+    answers: dict[str, str] = Field(default_factory=dict, max_length=30)
+    proceed_with_assumptions: bool = False
+
+    @model_validator(mode='after')
+    def bounded(self):
+        if any(len(k) > 60 or len(v) > 4000 for k, v in self.answers.items()):
+            raise ValueError('Answer keys are limited to 60 characters and answers to 4000 characters.')
+        if not self.proceed_with_assumptions and not any(v.strip() for v in self.answers.values()):
+            raise ValueError('Provide at least one answer or proceed with assumptions.')
+        return self
+
+
+class ProposalReview(Strict):
+    decision: Literal['approve', 'request_changes']
+    comments: str = Field(default='', max_length=4000)
+
+    @model_validator(mode='after')
+    def explain_changes(self):
+        if self.decision == 'request_changes' and len(self.comments.strip()) < 5:
+            raise ValueError('Describe the changes required for the next draft.')
+        return self
+
+
+class OrchestratorRequest(Strict):
+    """Free-text request to the Orchestrator, which routes it by proposal state."""
+    message: str = Field(min_length=2, max_length=16000)
+    formats: list[ProposalFormat] = Field(default_factory=list, max_length=2)
+    preferences: Preferences = Field(default_factory=Preferences)
+
+
+class RequirementItem(Strict):
+    id: str = Field(max_length=60)
+    category: str = Field(max_length=80)
+    statement: str = Field(max_length=1500)
+    status: Literal['clear', 'ambiguous', 'answered', 'assumed']
+    source: str = Field(default='', max_length=300)
+
+
+class MissingInformation(Strict):
+    id: str = Field(max_length=60)
+    question: str = Field(max_length=600)
+    reason: str = Field(max_length=600)
+    required: bool = True
+
+
+class RequirementsAssessment(Strict):
+    summary: str = Field(max_length=4000)
+    requirements: list[RequirementItem] = Field(max_length=60)
+    missing: list[MissingInformation] = Field(max_length=20)
+    ready: bool
+
+
+class ProposalPlan(Strict):
+    response_type: str = Field(max_length=150)
+    formats: list[ProposalFormat] = Field(min_length=1, max_length=2)
+    outline: list[str] = Field(min_length=1, max_length=25)
+    win_themes: list[str] = Field(max_length=10)
+    tone: str = Field(max_length=300)
+
+
+class EstimationResult(Strict):
+    estimates: list[Estimate] = Field(min_length=1, max_length=100)
+    contingency_percent: float = Field(ge=0, le=100)
+    notes: str = Field(default='', max_length=2000)
+
+
+class ResourcePlan(Strict):
+    resources: list[ResourceRole] = Field(min_length=1, max_length=40)
+    staffing_fte: float = Field(gt=0, le=10000)
+    notes: str = Field(default='', max_length=2000)
+
+
+class MethodologyPlan(Strict):
+    methodology: Methodology
+    phases: list[Phase] = Field(min_length=1, max_length=20)
 
 
 class EstimateUpdate(Strict):
