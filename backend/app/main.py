@@ -15,11 +15,12 @@ from sqlalchemy import select, func
 from sqlalchemy.orm import Session as DBSession
 from .config import settings
 from .db import Base, engine, Session, get_db, User, Project, Version, Attachment, Job, Artifact, Audit, Proposal, AgentMessage, ResponseDocument, now, uid
-from .schemas import Generate, Solution, EstimateUpdate, ProposalCreate, ProposalAnswers, ProposalReview, calculate
+from .schemas import Generate, Solution, EstimateUpdate, ProposalCreate, ProposalAnswers, ProposalReview, OrchestratorRequest, calculate
 from .context import extract_isolated
 from .storage import storage
 from .artifacts import MIMES
 from .worker import run_forever, ACTIVE
+from .agents import OrchestratorAgent, RoutingError
 
 oauth = OAuth()
 if settings.auth_mode == 'oidc':
@@ -407,10 +408,6 @@ def download(token: str, inline: bool = False, user=Depends(current_user), db: D
     return Response(data, media_type=MIMES.get(ext, 'application/octet-stream'), headers={'Content-Disposition':f'{disposition}; filename="{a.filename}"', 'Cache-Control':'private, no-store'})
 
 
-OPEN_PROPOSAL = ['Queued', 'Collecting Requirements', 'Awaiting Information', 'Drafting', 'Pending Review']
-PUBLISHED_KINDS = ['docx', 'pptx', 'pdf', 'xlsx', 'zip']
-
-
 def owned_proposal(db, user, proposal_id):
     proposal = db.get(Proposal, proposal_id)
     if not proposal:
@@ -419,28 +416,33 @@ def owned_proposal(db, user, proposal_id):
     return proposal
 
 
-def queue_proposal(db, proposal, status='Queued'):
-    no_active_job(db, proposal.project_id)
-    proposal.status, proposal.error, proposal.updated_at = status, None, now()
-    job = Job(project_id=proposal.project_id, proposal_id=proposal.id, kind='proposal')
-    db.add(job)
-    db.get(Project, proposal.project_id).updated_at = now()
-    return job
+def orchestrate(db, project_id, action):
+    """Every proposal request from the UI is routed by the Orchestrator agent."""
+    db.scalar(select(Project).where(Project.id == project_id).with_for_update())
+    try:
+        return action(OrchestratorAgent(db))
+    except RoutingError as exc:
+        db.rollback()
+        raise HTTPException(exc.status, exc.detail) from None
+
+
+@app.post('/api/projects/{project_id}/orchestrator', status_code=202)
+def orchestrator_request(project_id: str, body: OrchestratorRequest, user=Depends(current_user), db: DBSession = Depends(get_db)):
+    owned(db, user, project_id)
+    limit_jobs(db, user)
+    no_active_job(db, project_id)
+    intent, proposal, job = orchestrate(db, project_id, lambda o: o.message(project_id, body.message, body.formats, body.preferences.model_dump()))
+    audit(db, user, f'orchestrator_{intent}', proposal.id)
+    db.commit()
+    return {'intent': intent, 'proposal_id': proposal.id, 'job': job}
 
 
 @app.post('/api/projects/{project_id}/proposals', status_code=202)
 def create_proposal(project_id: str, body: ProposalCreate, user=Depends(current_user), db: DBSession = Depends(get_db)):
     owned(db, user, project_id)
     limit_jobs(db, user)
-    db.scalar(select(Project).where(Project.id == project_id).with_for_update())
-    if db.scalar(select(Proposal.id).where(Proposal.project_id == project_id, Proposal.status.in_(OPEN_PROPOSAL)).limit(1)):
-        raise HTTPException(409, 'This project already has an open proposal. Approve it or let it fail before starting another.')
     no_active_job(db, project_id)
-    proposal = Proposal(project_id=project_id, request=body.request, formats=list(dict.fromkeys(body.formats)), preferences=body.preferences.model_dump())
-    db.add(proposal)
-    db.flush()
-    db.add(AgentMessage(proposal_id=proposal.id, agent='User', recipient='RequirementsCollector', kind='task', content='New RFP response requested.'))
-    job = queue_proposal(db, proposal)
+    proposal, job = orchestrate(db, project_id, lambda o: o.new_rfp(project_id, body.request, body.formats, body.preferences.model_dump()))
     audit(db, user, 'proposal_created', proposal.id)
     db.commit()
     return {'proposal_id': proposal.id, 'job': job}
@@ -449,14 +451,9 @@ def create_proposal(project_id: str, body: ProposalCreate, user=Depends(current_
 @app.post('/api/proposals/{proposal_id}/answers', status_code=202)
 def answer_proposal(proposal_id: str, body: ProposalAnswers, user=Depends(current_user), db: DBSession = Depends(get_db)):
     proposal = owned_proposal(db, user, proposal_id)
-    if proposal.status != 'Awaiting Information':
-        raise HTTPException(409, 'This proposal is not waiting for information.')
     limit_jobs(db, user)
-    proposal.answers = {**(proposal.answers or {}), **{k: v.strip() for k, v in body.answers.items() if v.strip()}}
-    proposal.assumptions_accepted = proposal.assumptions_accepted or body.proceed_with_assumptions
-    summary = f'Provided {len(body.answers)} answer(s)' + (' and asked the agents to proceed with assumptions.' if body.proceed_with_assumptions else '.')
-    db.add(AgentMessage(proposal_id=proposal.id, agent='User', recipient='RequirementsCollector', kind='result', content=summary))
-    job = queue_proposal(db, proposal)
+    no_active_job(db, proposal.project_id)
+    job = orchestrate(db, proposal.project_id, lambda o: o.provide_information(proposal, body.answers, body.proceed_with_assumptions))
     audit(db, user, 'proposal_answered', proposal.id)
     db.commit()
     return job
@@ -465,57 +462,25 @@ def answer_proposal(proposal_id: str, body: ProposalAnswers, user=Depends(curren
 @app.post('/api/proposals/{proposal_id}/review')
 def review_proposal(proposal_id: str, body: ProposalReview, user=Depends(current_user), db: DBSession = Depends(get_db)):
     proposal = owned_proposal(db, user, proposal_id)
-    if proposal.status != 'Pending Review' or not proposal.draft_version_id:
-        raise HTTPException(409, 'Only a proposal pending review can be approved or sent back.')
     no_active_job(db, proposal.project_id)
-    entry = {'decision': body.decision, 'comments': body.comments.strip(), 'reviewer': user.name, 'version_id': proposal.draft_version_id, 'at': now().isoformat()}
     if body.decision == 'request_changes':
         limit_jobs(db, user)
-        proposal.reviews = [*(proposal.reviews or []), entry]
-        db.add(AgentMessage(proposal_id=proposal.id, agent='Reviewer', recipient='ProposalCreator', kind='question', content='Changes requested: ' + entry['comments']))
-        job = queue_proposal(db, proposal)
+        job = orchestrate(db, proposal.project_id, lambda o: o.request_changes(proposal, body.comments, user.name))
         audit(db, user, 'proposal_changes_requested', proposal.id)
         db.commit()
         return {'status': proposal.status, 'job': job}
-    artifacts = db.scalars(select(Artifact).where(Artifact.version_id == proposal.draft_version_id)).all()
-    if not artifacts or any(a.status != 'Completed' for a in artifacts):
-        raise HTTPException(409, 'All draft files must be completed before approval. Retry failed files first.')
-    version = db.get(Version, proposal.draft_version_id)
-    written = []
-    try:
-        for a in artifacts:
-            if a.kind not in PUBLISHED_KINDS or not a.key:
-                continue
-            data = storage.get(a.key)
-            key = f'{proposal.project_id}/response-documents/{proposal.id}/{a.filename}'
-            storage.put(key, data, MIMES.get(a.filename.rsplit('.', 1)[-1], 'application/octet-stream'))
-            written.append(key)
-            db.add(ResponseDocument(project_id=proposal.project_id, proposal_id=proposal.id, version_id=version.id, kind=a.kind, filename=a.filename, key=key, size=len(data)))
-    except Exception:
-        db.rollback()
-        for key in written:
-            try:
-                storage.delete(key)
-            except Exception:
-                pass
-        raise HTTPException(503, 'Could not publish response documents. Check storage and retry approval.') from None
-    stamp = now()
-    proposal.reviews = [*(proposal.reviews or []), entry]
-    proposal.status, proposal.approved_by, proposal.approved_at, proposal.published_at, proposal.updated_at = 'Live', user.id, stamp, stamp, stamp
-    db.add(AgentMessage(proposal_id=proposal.id, agent='Reviewer', recipient='DocumentsAgent', kind='result', content='Approved' + (': ' + entry['comments'] if entry['comments'] else '.')))
-    db.add(AgentMessage(proposal_id=proposal.id, agent='DocumentsAgent', recipient='User', kind='result', content=f'Published {len(written)} response document(s) from draft v{version.number}. The proposal is live.'))
+    count = orchestrate(db, proposal.project_id, lambda o: o.approve(proposal, body.comments, user))
     audit(db, user, 'proposal_approved', proposal.id)
     db.commit()
-    return {'status': proposal.status, 'documents': len(written)}
+    return {'status': proposal.status, 'documents': count}
 
 
 @app.post('/api/proposals/{proposal_id}/retry', status_code=202)
 def retry_proposal(proposal_id: str, user=Depends(current_user), db: DBSession = Depends(get_db)):
     proposal = owned_proposal(db, user, proposal_id)
-    if proposal.status != 'Failed':
-        raise HTTPException(409, 'Only a failed proposal can be retried.')
     limit_jobs(db, user)
-    job = queue_proposal(db, proposal)
+    no_active_job(db, proposal.project_id)
+    job = orchestrate(db, proposal.project_id, lambda o: o.retry(proposal))
     audit(db, user, 'proposal_retried', proposal.id)
     db.commit()
     return job
