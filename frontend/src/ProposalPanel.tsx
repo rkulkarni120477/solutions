@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { ArrowDownToLine, Bot, CheckCircle2, CircleHelp, ClipboardCheck, FileText, LoaderCircle, RefreshCw, Send, ShieldCheck, Upload, Workflow } from 'lucide-react';
 import './proposal.css';
+import { TemplateSelectors } from './Templates';
+import type { ProposalTemplate, TemplateSelection } from './Templates';
 
 export type AgentMessage = {id:string;agent:string;recipient:string|null;kind:string;content:string;created_at:string};
 export type Requirement = {id:string;category:string;statement:string;status:string;source:string};
@@ -26,8 +28,9 @@ const BUSY = ['Queued','Collecting Requirements','Drafting'];
 const size = (n:number)=>n>1048576?(n/1048576).toFixed(1)+' MB':Math.max(1,Math.round(n/1024))+' KB';
 const time = (s:string)=>new Date(s).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
 
-export function ProposalStart({onStart,disabled}:{onStart:(request:string,formats:string[],cloud:string,files:File[])=>Promise<void>;disabled:boolean}){
+export function ProposalStart({onStart,disabled,templates,onManageTemplates}:{onStart:(request:string,formats:string[],cloud:string,files:File[],selection:TemplateSelection)=>Promise<void>;disabled:boolean;templates:ProposalTemplate[];onManageTemplates:()=>void}){
  const [request,setRequest]=useState(''),[formats,setFormats]=useState<string[]>(['docx','pptx']),[cloud,setCloud]=useState('No preference'),[files,setFiles]=useState<File[]>([]);
+ const [templateSelection,setTemplateSelection]=useState<TemplateSelection>({});
  const toggle=(f:string)=>setFormats(formats.includes(f)?formats.filter(x=>x!==f):[...formats,f]);
  return <section className="surface proposal-start">
   <div className="proposal-title"><span className="proposal-icon"><Workflow size={20}/></span><div><div className="section-eyebrow">PRESALES AGENTS</div><h2>Start an RFP response</h2><p>The Orchestrator assigns your request to the Requirements, Proposal, Estimations, Resources, Methodology and Documents agents. You review and approve before anything goes live.</p></div></div>
@@ -41,7 +44,8 @@ export function ProposalStart({onStart,disabled}:{onStart:(request:string,format
    <label className="proposal-select">Target platform<select value={cloud} onChange={e=>setCloud(e.target.value)}>{['No preference','Azure','AWS','GCP','Hybrid','On-premises'].map(c=><option key={c}>{c}</option>)}</select></label>
    <label className="proposal-upload"><Upload size={15}/> {files.length?`${files.length} RFP file(s)`:'Attach RFP documents'}<input type="file" multiple accept=".pdf,.docx,.txt,.md" onChange={e=>setFiles(Array.from(e.target.files||[]))}/></label>
   </div>
-  <div className="proposal-actions"><span className="muted">{request.trim().length<20?'Describe the RFP in at least 20 characters.':formats.length?'':'No format selected: the Proposal creator will decide.'}</span><button className="primary" disabled={disabled||request.trim().length<20} onClick={()=>onStart(request.trim(),formats,cloud,files)}><Send size={15}/> Send to Orchestrator</button></div>
+  <div className="template-picker-heading"><h3>Proposal templates</h3><button className="text-button" onClick={onManageTemplates}>Manage templates</button></div><TemplateSelectors templates={templates} value={templateSelection} onChange={setTemplateSelection} disabled={disabled}/>
+  <div className="proposal-actions"><span className="muted">{request.trim().length<20?'Describe the RFP in at least 20 characters.':formats.length?'':'No format selected: the Proposal creator will decide.'}</span><button className="primary" disabled={disabled||request.trim().length<20} onClick={()=>onStart(request.trim(),formats,cloud,files,templateSelection)}><Send size={15}/> Send to Orchestrator</button></div>
  </section>;
 }
 

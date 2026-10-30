@@ -13,7 +13,7 @@ with tempfile.TemporaryDirectory(prefix='workspace-migrations-') as temp:
         subprocess.run([sys.executable,'-m','alembic','-c','backend/alembic.ini',*action],env=env,check=True)
         engine=create_engine(url)
         tables=set(inspect(engine).get_table_names())
-        expected={'users','projects','versions','attachments','jobs','artifacts','audit_events','proposals','agent_messages','response_documents'}
+        expected={'users','projects','versions','attachments','jobs','artifacts','audit_events','proposals','agent_messages','response_documents','proposal_templates'}
         assert (expected <= tables) if action[0]=='upgrade' else not (expected & tables)
         engine.dispose()
     # Detect drift between the frozen migration and current SQLAlchemy models.

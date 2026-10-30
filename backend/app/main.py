@@ -21,6 +21,8 @@ from .storage import storage
 from .artifacts import MIMES
 from .worker import run_forever, ACTIVE
 from .agents import OrchestratorAgent, RoutingError
+from .db import ProposalTemplate
+from .templates import prepare_template, validate_selection
 
 oauth = OAuth()
 if settings.auth_mode == 'oidc':
@@ -105,6 +107,65 @@ def health():
 @app.get('/api/config')
 def config():
     return {'auth_mode': settings.auth_mode, 'provider': settings.llm_provider, 'demo': settings.llm_provider == 'demo', 'retention_days': settings.retention_days, 'upload_max_mb': settings.upload_max_mb}
+
+
+def template_metadata(row):
+    return {'id': row.id, 'filename': row.filename, 'kind': row.kind, 'size': row.size, 'created_at': row.created_at}
+
+
+@app.get('/api/templates')
+def list_templates(user=Depends(current_user), db: DBSession = Depends(get_db)):
+    return [template_metadata(row) for row in db.scalars(select(ProposalTemplate).where(ProposalTemplate.owner_id == user.id, ProposalTemplate.archived == False).order_by(ProposalTemplate.created_at.desc()))]
+
+
+@app.post('/api/templates', status_code=201)
+def upload_template(file: UploadFile = File(...), user=Depends(current_user), db: DBSession = Depends(get_db)):
+    filename = (file.filename or 'template').replace('\\', '/').rsplit('/', 1)[-1]
+    filename = ''.join(c for c in filename if c.isprintable())[:220]
+    data = file.file.read(settings.upload_max_mb * 1024 * 1024 + 1)
+    if not data or len(data) > settings.upload_max_mb * 1024 * 1024:
+        raise HTTPException(400, f'Upload a non-empty template of at most {settings.upload_max_mb} MB.')
+    try:
+        kind, data = prepare_template(filename, data)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    filename = filename.rsplit('.', 1)[0] + '.' + kind
+    row = ProposalTemplate(owner_id=user.id, filename=filename, kind=kind, size=len(data), key=f'templates/{user.id}/{uid()}')
+    try:
+        storage.put(row.key, data)
+    except Exception:
+        raise HTTPException(503, 'Template storage is unavailable. Please retry.') from None
+    db.add(row)
+    db.flush()
+    audit(db, user, 'template_uploaded', row.id)
+    db.commit()
+    return template_metadata(row)
+
+
+@app.get('/api/templates/{template_id}/file')
+def download_template(template_id: str, user=Depends(current_user), db: DBSession = Depends(get_db)):
+    row = db.get(ProposalTemplate, template_id)
+    if not row or row.owner_id != user.id or row.archived:
+        raise HTTPException(404, 'Template not found.')
+    try:
+        _, data = prepare_template(row.filename, storage.get(row.key))
+    except Exception:
+        raise HTTPException(503, 'Template storage is unavailable. Please retry.') from None
+    # Use an encoded filename so uploaded names cannot change response headers.
+    from urllib.parse import quote
+    filename = row.filename.rsplit('.', 1)[0] + '.' + row.kind
+    return Response(data, media_type='application/octet-stream', headers={'Content-Disposition': "attachment; filename*=UTF-8''" + quote(filename, safe='')})
+
+
+@app.delete('/api/templates/{template_id}')
+def remove_template(template_id: str, user=Depends(current_user), db: DBSession = Depends(get_db)):
+    row = db.get(ProposalTemplate, template_id)
+    if not row or row.owner_id != user.id or row.archived:
+        raise HTTPException(404, 'Template not found.')
+    row.archived = True
+    audit(db, user, 'template_removed', row.id)
+    db.commit()
+    return {'ok': True}
 
 
 @app.post('/api/auth/demo')
@@ -270,6 +331,7 @@ def new_version(db, project, prompt, preferences, response=None):
 def submit(project_id: str, body: Generate, user=Depends(current_user), db: DBSession = Depends(get_db)):
     project = owned(db, user, project_id)
     limit_jobs(db, user)
+    validate_selection(db, user, body.preferences)
     job = new_version(db, project, body.prompt, body.preferences.model_dump())
     audit(db, user, 'generation_queued', job.id)
     db.commit()
@@ -428,6 +490,7 @@ def orchestrate(db, project_id, action):
 
 @app.post('/api/projects/{project_id}/orchestrator', status_code=202)
 def orchestrator_request(project_id: str, body: OrchestratorRequest, user=Depends(current_user), db: DBSession = Depends(get_db)):
+    validate_selection(db, user, body.preferences)
     owned(db, user, project_id)
     limit_jobs(db, user)
     no_active_job(db, project_id)
@@ -439,6 +502,7 @@ def orchestrator_request(project_id: str, body: OrchestratorRequest, user=Depend
 
 @app.post('/api/projects/{project_id}/proposals', status_code=202)
 def create_proposal(project_id: str, body: ProposalCreate, user=Depends(current_user), db: DBSession = Depends(get_db)):
+    validate_selection(db, user, body.preferences)
     owned(db, user, project_id)
     limit_jobs(db, user)
     no_active_job(db, project_id)

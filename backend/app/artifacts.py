@@ -19,6 +19,7 @@ from .schemas import Solution, calculate
 from .db import Artifact, Proposal
 from .storage import storage
 from .presentation import create_presentation
+from .templates import template_for_version, prepare_template
 
 
 MIMES = {'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'pdf': 'application/pdf', 'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation', 'zip': 'application/zip', 'svg': 'image/svg+xml', 'png': 'image/png', 'jpg': 'image/jpeg', 'mmd': 'text/plain'}
@@ -86,18 +87,25 @@ def text_blocks(s):
     yield 'Calculated estimate totals', json.dumps(calculate(s), indent=2)
 
 
-def create_document(kind, solution, provider, diagrams=None, metadata=None):
+def create_document(kind, solution, provider, diagrams=None, metadata=None, template=None):
+    if template:
+        template = prepare_template('format.' + kind, template)[1]
     if kind == 'pptx':
-        return create_presentation(solution, provider, diagrams, metadata)
+        return create_presentation(solution, provider, diagrams, metadata, template)
     s = solution
     buffer = io.BytesIO()
     label = 'DEMO — illustrative template, not a live LLM response' if provider == 'demo' else f'Generated with {provider}; architect review required'
     if kind == 'docx':
-        doc = Document()
+        doc = Document(io.BytesIO(template)) if template else Document()
+        if template:
+            # The saved format contains no source body content or insertion tokens.
+            for paragraph in list(doc.paragraphs):
+                paragraph._p.getparent().remove(paragraph._p)
         doc.core_properties.title = s.title
         style = doc.styles['Normal']
-        style.font.name = 'Calibri'
-        style.font.size = Pt(10)
+        if not template:
+            style.font.name = 'Calibri'
+            style.font.size = Pt(10)
         doc.add_heading(s.title, 0)
         doc.add_paragraph(label)
         if metadata and metadata.get('proposal'):
@@ -111,7 +119,8 @@ def create_document(kind, solution, provider, diagrams=None, metadata=None):
             doc.add_picture(io.BytesIO(png), width=Inches(6))
         if s.estimates:
             table = doc.add_table(rows=1, cols=5)
-            table.style = 'Light Shading Accent 1'
+            if 'Light Shading Accent 1' in doc.styles:
+                table.style = 'Light Shading Accent 1'
             for cell, value in zip(table.rows[0].cells, ['Activity', 'Role', 'Low', 'Expected', 'High']):
                 cell.text = value
             for row in s.estimates:
@@ -120,13 +129,15 @@ def create_document(kind, solution, provider, diagrams=None, metadata=None):
         if s.resources:
             doc.add_heading('Proposed team', 1)
             team = doc.add_table(rows=1, cols=4)
-            team.style = 'Light Shading Accent 1'
+            if 'Light Shading Accent 1' in doc.styles:
+                team.style = 'Light Shading Accent 1'
             for cell, value in zip(team.rows[0].cells, ['Role', 'Count', 'Allocation', 'Effort (person-days)']):
                 cell.text = value
             for r in s.resources:
                 for cell, value in zip(team.add_row().cells, [r.role, f'{r.count:g}', r.allocation, f'{r.effort_days:g}']):
                     cell.text = value
-        doc.sections[0].footer.paragraphs[0].text = 'Solution Architect Workspace • Review before implementation'
+        if not template:
+            doc.sections[0].footer.paragraphs[0].text = 'Solution Architect Workspace • Review before implementation'
         doc.save(buffer)
     elif kind == 'pdf':
         styles = getSampleStyleSheet()
@@ -220,4 +231,4 @@ def build_artifact(db, artifact, version, cache):
     meta = {'project_id': version.project_id, 'version': version.number, 'created_at': version.created_at.isoformat()}
     if db.query(Proposal.id).filter(Proposal.draft_version_id == version.id).first():
         meta['proposal'] = True
-    return create_document(artifact.kind, s, version.provider, diagrams, meta)
+    return create_document(artifact.kind, s, version.provider, diagrams, meta, template_for_version(db, version, artifact.kind))

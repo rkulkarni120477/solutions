@@ -2,8 +2,8 @@
 
 Agents collaborate through a persisted AgentBus so every hand-off is auditable in the UI:
 RequirementsCollector -> ProposalCreator -> (Estimations, Resources) -> Documents -> DeliveryMethodology.
-In LLM mode each agent requests schema-validated JSON; supporting agents fall back to deterministic
-logic (with a logged warning) so a single weak response does not discard the whole draft.
+In LLM mode each agent requests schema-validated JSON. Provider failures stop the workflow
+instead of substituting deterministic demo output.
 """
 import json
 import math
@@ -58,14 +58,14 @@ def live():
 
 
 def consult(bus, agent, model, system, payload, fallback, validate=None):
-    """Ask the LLM for a schema-valid result; fall back to deterministic logic on failure."""
+    """Use deterministic logic only in demo mode; surface live provider failures."""
     if not live():
         return fallback()
     try:
         return structured(model, f'You are the {agent} in a presales proposal team. {system} {GUARD}', payload, validate)
     except ProviderError as exc:
-        bus.send(agent, None, 'warning', f'LLM result unavailable ({exc}). Used the deterministic {agent} baseline instead.')
-        return fallback()
+        bus.send(agent, None, 'error', f'Live generation failed: {exc}')
+        raise
 
 
 def passages(attachments, limit=12, size=1200):

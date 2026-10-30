@@ -53,7 +53,9 @@ cd frontend
 npm.cmd run dev
 ```
 
-Open **http://localhost:5173**. Vite proxies same-origin `/api` calls. The embedded worker is for local single-process use only. For a single-port compiled preview, set `PUBLIC_URL=http://localhost:8000`, build the UI and run just the API and renderer. `scripts/start-local.ps1` starts this compiled preview in hidden background processes on Windows; `scripts/stop-local.ps1` stops only those processes.
+Open **http://localhost:5173**. Vite proxies same-origin `/api` calls. The embedded worker is for local single-process use only. For a single-port compiled preview, set `PUBLIC_URL=http://localhost:8000`, build the UI and run just the API and renderer. `scripts/start-local.ps1` starts a compiled preview at `http://localhost:6001` in hidden background processes on Windows; `scripts/stop-local.ps1` stops only those processes.
+
+The Windows launcher defaults to port 6001 (`scripts/start-local.ps1 -Port 6001`); use `-Port` to select another port. It sets `PUBLIC_URL` to match. Port 6000 is restricted by browsers; use the default port 6001 for normal browser access.
 
 On macOS/Linux use `.venv/bin/python`, `npm`, and `export PYTHONPATH=backend`. Chrome may be selected using `CHROMIUM_PATH`; otherwise install the renderer's Playwright Chromium version.
 
@@ -86,9 +88,23 @@ Choose **New RFP response** in the left menu. Paste the RFP text or summary, pic
 | DeliveryMethodology | Delivery approach (Agile/hybrid/SAFe), phases and governance. |
 | Documents | Builds the Word document and/or PowerPoint deck with technical diagrams, estimates, team and methodology. |
 
-Flow: **Collecting Requirements → (Awaiting Information) → Drafting → Pending Review → Live**. In **Pending Review** a reviewer (human in the loop) reads the draft files, then either requests changes (another drafting round that uses the comments) or chooses **Approve & publish**. Approval copies the draft files into immutable **Response Documents**, shown under the proposal with signed download links. The agent activity log shows every message exchanged between agents. With a live provider each agent uses the LLM with schema-validated output; in demo mode, or if the LLM call fails, agents use deterministic logic and log a warning.
+Flow: **Collecting Requirements → (Awaiting Information) → Drafting → Pending Review → Live**. In **Pending Review** a reviewer (human in the loop) reads the draft files, then either requests changes (another drafting round that uses the comments) or chooses **Approve & publish**. Approval copies the draft files into immutable **Response Documents**, shown under the proposal with signed download links. The agent activity log shows every message exchanged between agents. With a live provider each agent uses the LLM with schema-validated output. Provider failures stop the workflow with an actionable error; deterministic logic is used only in explicit demo mode.
 
 API: `POST /api/projects/{id}/orchestrator` (free-text entry point), `POST /api/projects/{id}/proposals`, `POST /api/proposals/{id}/answers`, `POST /api/proposals/{id}/review`, `POST /api/proposals/{id}/retry`, `POST /api/response-documents/{id}/download-link`.
+
+## Reusable proposal templates
+
+Open **Templates** in the left menu to upload private Word (`.docx`, `.dotx`) and PowerPoint (`.pptx`, `.potx`) templates, up to the configured upload limit per file. The library supports downloads and removal with confirmation. Legacy `.doc`/`.ppt`, encrypted files, macros and embedded objects are not supported.
+
+Choose a Word and/or PowerPoint template under **New RFP response > Proposal templates**, or in a solution's **Advanced options**. Leaving a selector on **Workspace default** keeps the standard export. Template choices are saved with proposal versions and apply to DOCX/PPTX exports, including revisions and refreshed deliverables; PDF exports retain the standard layout.
+
+Uploads are converted into content-free formats **before storage**; original uploads are not retained. Word keeps named styles, detected body fonts, paragraph spacing and page settings. Body content, tables, images, header/footer text, comments, metadata and unrelated package parts are removed. No insertion markers or title/summary tokens are needed. PowerPoint keeps its canvas, theme, detected body font, colors, decorative geometry and reusable master/layout formatting. Sample slides, all text, pictures, charts, notes, comments and metadata are removed. Generated proposals supply fresh content using the saved format. Downloads return the cleaned format, normalized to `.docx` or `.pptx`.
+
+For a library created before this behavior, run `PYTHONPATH=backend python scripts/clean-template-library.py` (PowerShell: set `$env:PYTHONPATH='backend'` first). It cleans active and archived template sources in place without modifying generated proposal artifacts.
+
+Removing a template hides it from new selections. Its cleaned format is retained privately for existing proposal versions and file retries. Templates belong to the signed-in user; demo accounts remain tied to their browser session. Production upgrades must run the `0003` migration before starting the API/worker.
+
+API: `GET/POST /api/templates`, `GET /api/templates/{id}/file`, `DELETE /api/templates/{id}`.
 
 ## Configure a live provider
 

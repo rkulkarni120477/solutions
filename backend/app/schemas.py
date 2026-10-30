@@ -8,6 +8,8 @@ class Strict(BaseModel):
 
 
 class Preferences(Strict):
+    word_template_id: str | None = Field(default=None, max_length=36)
+    powerpoint_template_id: str | None = Field(default=None, max_length=36)
     cloud: Literal['AWS', 'Azure', 'GCP', 'Hybrid', 'On-premises', 'No preference'] = 'No preference'
     technologies: str = Field(default='', max_length=2000)
     domain: str = Field(default='', max_length=500)

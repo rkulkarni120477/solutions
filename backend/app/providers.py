@@ -26,6 +26,12 @@ class ProviderError(Exception):
     pass
 
 
+def validate_response(model, text):
+    """Accept a JSON code fence without relaxing schema or JSON validation."""
+    fenced = re.fullmatch(r'\s*```(?:json)?\s*\n(.*?)\n```\s*', text, re.DOTALL | re.IGNORECASE)
+    return model.model_validate_json(fenced.group(1) if fenced else text)
+
+
 _SCALE_UNITS = {'k': 1_000, 'thousand': 1_000, 'm': 1_000_000, 'million': 1_000_000}
 _INTEGRATIONS = ['sap', 'salesforce', 'dynamics', 'servicenow', 'workday', 'oracle', 'guidewire', 'erp', 'crm', 'mainframe',
                  'payment', 'third-party', 'third party', 'legacy system', 'partner api', 'external api', 'sharepoint', 'teams']
@@ -208,7 +214,7 @@ def structured(model, system, payload, validate=None):
     last = None
     for attempt in range(2):
         try:
-            result = model.model_validate_json(_complete(system, payload_text))
+            result = validate_response(model, _complete(system, payload_text))
             return validate(result) if validate else result
         except ProviderError:
             raise
@@ -240,7 +246,7 @@ def generate(context, repair=None):
     for attempt in range(2):
         try:
             text = _complete(SYSTEM, payload_text)
-            solution = Solution.model_validate_json(text)
+            solution = validate_response(Solution, text)
             allowed = {p['id'] for p in context['reference_passages']}
             if any(source not in allowed for section in solution.sections for source in section.sources):
                 raise ValueError('The response cited a source that was not in the supplied context.')

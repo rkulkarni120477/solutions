@@ -34,6 +34,18 @@ class Project(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class ProposalTemplate(Base):
+    __tablename__ = 'proposal_templates'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    owner_id: Mapped[str] = mapped_column(ForeignKey('users.id'), index=True)
+    filename: Mapped[str] = mapped_column(String(220))
+    kind: Mapped[str] = mapped_column(String(10))
+    key: Mapped[str] = mapped_column(String(500))
+    size: Mapped[int] = mapped_column(Integer)
+    archived: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class Version(Base):
     __tablename__ = 'versions'
     __table_args__ = (UniqueConstraint('project_id', 'number'),)

@@ -1,4 +1,5 @@
 import io
+import pytest
 from docx import Document
 from pptx import Presentation
 from app import worker, artifacts
@@ -9,6 +10,37 @@ VAGUE = 'We need a proposal for a new customer portal for our insurance business
 COMPLETE = ('Client: Contoso Insurance. Objective: reduce claim handling time by 30%. Scope: build a customer self-service portal with claims '
             'submission and integration to the policy system. Timeline: go-live within 4 months. Budget: fixed price under USD 400k. '
             'Platform: Azure with .NET and React. Scale: 20,000 users, 99.9% availability and strong security. The portal must support SSO.')
+
+
+def test_live_agent_failure_never_uses_demo_output(monkeypatch):
+    from app import agents
+    from app.providers import ProviderError
+    from app.schemas import ProposalPlan
+    messages = []
+    class Bus:
+        def send(self, *message):
+            messages.append(message)
+    monkeypatch.setattr(agents.settings, 'llm_provider', 'bedrock')
+    def unavailable(*args):
+        raise ProviderError('Model access denied')
+    monkeypatch.setattr(agents, 'structured', unavailable)
+    def demo():
+        pytest.fail('Live provider failure must not produce demo output')
+    with pytest.raises(ProviderError, match='Model access denied'):
+        agents.consult(Bus(), 'ProposalCreator', ProposalPlan, 'Plan response', {}, demo)
+    assert messages[0][2] == 'error'
+
+
+def test_provider_json_fence_preserves_schema_validation():
+    from app.providers import validate_response
+    from app.schemas import ProposalPlan
+    from pydantic import ValidationError
+    result = ProposalPlan(response_type='Technical response', formats=['docx'], outline=['Solution'], win_themes=['Security'], tone='Clear')
+    assert validate_response(ProposalPlan, '```json\n' + result.model_dump_json() + '\n```') == result
+    with pytest.raises(ValidationError):
+        validate_response(ProposalPlan, '```json\n{"formats": ["invalid"]}\n```')
+    with pytest.raises(ValidationError):
+        validate_response(ProposalPlan, 'Some commentary\n```json\n' + result.model_dump_json() + '\n```')
 
 
 def drain():

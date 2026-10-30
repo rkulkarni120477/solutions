@@ -4,6 +4,7 @@ import json
 import re
 import textwrap
 from decimal import Decimal
+from lxml import etree
 
 from PIL import Image
 from pptx import Presentation
@@ -24,6 +25,31 @@ MUTED = '62758B'
 PALE = 'EFF4FA'
 WHITE = 'FFFFFF'
 WIDTH, HEIGHT = 13.333, 7.5
+
+
+def template_background_is_dark(slide):
+    """Resolve a solid template background without changing inherited artwork."""
+    master = slide.slide_layout.slide_master
+    color = 'FFFFFF'
+    for element in [slide._element, slide.slide_layout._element, master._element]:
+        backgrounds = element.xpath('./p:cSld/p:bg')
+        if not backgrounds:
+            continue
+        rgb = backgrounds[0].xpath('.//a:srgbClr/@val')
+        scheme = backgrounds[0].xpath('.//a:schemeClr/@val')
+        if rgb:
+            color = rgb[0]
+        elif scheme:
+            name = {'bg1':'lt1','bg2':'lt2','tx1':'dk1','tx2':'dk2'}.get(scheme[0], scheme[0])
+            theme = next((rel.target_part for rel in master.part.rels.values() if rel.reltype.endswith('/theme')), None)
+            if theme:
+                root = etree.fromstring(theme.blob)
+                namespace = {'a':'http://schemas.openxmlformats.org/drawingml/2006/main'}
+                values = root.xpath(f'//a:clrScheme/a:{name}/*/@val | //a:clrScheme/a:{name}/*/@lastClr', namespaces=namespace)
+                color = next((v for v in values if re.fullmatch(r'[0-9A-Fa-f]{6}', v)), color)
+        break
+    r, g, b = (int(color[i:i+2], 16) for i in (0,2,4))
+    return .2126*r + .7152*g + .0722*b < 140
 
 
 def plain(text):
@@ -82,19 +108,31 @@ def pages(items, width=95, max_lines=16):
 
 
 class Briefing:
-    def __init__(self, solution, provider, metadata=None):
+    def __init__(self, solution, provider, metadata=None, template=None):
         self.solution = solution
         self.provider = provider
         self.metadata = metadata or {}
-        self.prs = Presentation()
-        self.prs.slide_width = Inches(WIDTH)
-        self.prs.slide_height = Inches(HEIGHT)
+        self.templated = bool(template)
+        self.prs = Presentation(io.BytesIO(template)) if template else Presentation()
+        if template:
+            for slide_id in list(self.prs.slides._sldIdLst):
+                self.prs.part.drop_rel(slide_id.rId)
+                self.prs.slides._sldIdLst.remove(slide_id)
+        else:
+            self.prs.slide_width = Inches(WIDTH)
+            self.prs.slide_height = Inches(HEIGHT)
+        self.layout = min(self.prs.slide_layouts, key=lambda layout: len(layout.placeholders)) if template else self.prs.slide_layouts[6]
         self.prs.core_properties.title = solution.title
         self.prs.core_properties.subject = 'Project solution briefing and estimates'
         self.prs.core_properties.author = 'Solution Architect Workspace'
         self.label = 'DEMO: illustrative output. No live LLM response.' if provider == 'demo' else f'Provider: {provider}. Architect review required.'
 
     def text(self, slide, text, x, y, w, h, size=18, color=INK, bold=False, align=PP_ALIGN.LEFT):
+        if self.templated:
+            if slide._template_dark:
+                color = {INK:WHITE, NAVY:WHITE, BLUE:'9DBEFF', TEAL:'96D5CD', MUTED:'BDCEE3'}.get(color, color)
+            elif slide._template_cover:
+                color = {WHITE:INK, 'BDCEE3':MUTED}.get(color, color)
         box = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
         tf = box.text_frame
         tf.clear()
@@ -104,7 +142,8 @@ class Briefing:
         for i, line in enumerate(str(text).split('\n')):
             p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
             p.text = line
-            p.font.name = 'Calibri'
+            if not self.templated:
+                p.font.name = 'Calibri'
             p.font.size = Pt(size)
             p.font.bold = bold
             p.font.color.rgb = RGBColor.from_string(color)
@@ -121,9 +160,16 @@ class Briefing:
         return shape
 
     def slide(self, title, subtitle='', dark=False):
-        slide = self.prs.slides.add_slide(self.prs.slide_layouts[6])
-        slide.background.fill.solid()
-        slide.background.fill.fore_color.rgb = RGBColor.from_string(NAVY if dark else WHITE)
+        slide = self.prs.slides.add_slide(self.layout)
+        if self.templated:
+            for placeholder in list(slide.placeholders):
+                placeholder._element.getparent().remove(placeholder._element)
+        if not self.templated:
+            slide.background.fill.solid()
+            slide.background.fill.fore_color.rgb = RGBColor.from_string(NAVY if dark else WHITE)
+        else:
+            slide._template_dark = template_background_is_dark(slide)
+            slide._template_cover = dark
         display_title = textwrap.shorten(title, width=110, placeholder='…')
         self.text(slide, display_title, .65, .65, 12, 1, 30 if len(display_title) < 45 else 24 if len(display_title) < 85 else 20, WHITE if dark else NAVY, True)
         if subtitle:
@@ -175,7 +221,8 @@ class Briefing:
                     cell.fill.solid()
                     cell.fill.fore_color.rgb = RGBColor.from_string(NAVY if r == 0 else WHITE if r % 2 == 0 else PALE)
                     for p in cell.text_frame.paragraphs:
-                        p.font.name = 'Calibri'
+                        if not self.templated:
+                            p.font.name = 'Calibri'
                         p.font.size = Pt(12 if r == 0 else 13)
                         p.font.bold = r == 0
                         p.font.color.rgb = RGBColor.from_string(WHITE if r == 0 else INK)
@@ -192,8 +239,8 @@ def number(value):
     return f'{value:,.2f}'.rstrip('0').rstrip('.')
 
 
-def create_presentation(solution: Solution, provider: str, diagrams=None, metadata=None):
-    deck = Briefing(solution, provider, metadata)
+def create_presentation(solution: Solution, provider: str, diagrams=None, metadata=None, template=None):
+    deck = Briefing(solution, provider, metadata, template)
     s, totals = solution, calculate(solution)
     proposal = bool(deck.metadata.get('proposal'))
     cover = deck.slide('RFP proposal response' if proposal else 'Project solution briefing', dark=True)
@@ -347,5 +394,24 @@ def create_presentation(solution: Solution, provider: str, diagrams=None, metada
     deck.text(closing, 'Architecture review\nScope and estimate validation\nStakeholder decisions\nDelivery approval', .8, 2.4, 11.6, 3.5, 27, WHITE)
     deck.notes(closing, 'Proposed review workflow. Approval status is not implied.\n' + deck.label)
     buffer = io.BytesIO()
+    if template:
+        # Generated content uses a virtual wide canvas; master artwork already uses
+        # the uploaded canvas and stays untouched. Scale generated shapes to fit.
+        sx, sy = deck.prs.slide_width / Inches(WIDTH), deck.prs.slide_height / Inches(HEIGHT)
+        for slide in deck.prs.slides:
+            for shape in slide.shapes:
+                shape.left, shape.top = int(shape.left * sx), int(shape.top * sy)
+                shape.width, shape.height = int(shape.width * sx), int(shape.height * sy)
+                frames = [shape.text_frame] if shape.has_text_frame else []
+                if shape.has_table:
+                    for column in shape.table.columns:
+                        column.width = int(column.width * sx)
+                    for row in shape.table.rows:
+                        row.height = int(row.height * sy)
+                    frames += [cell.text_frame for row in shape.table.rows for cell in row.cells]
+                for frame in frames:
+                    for paragraph in frame.paragraphs:
+                        if paragraph.font.size:
+                            paragraph.font.size = int(paragraph.font.size * min(sx, sy))
     deck.prs.save(buffer)
     return buffer.getvalue()
