@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { ArrowDownToLine, Bot, CheckCircle2, CircleHelp, ClipboardCheck, FileText, LoaderCircle, RefreshCw, Send, ShieldCheck, Upload, Workflow } from 'lucide-react';
 import './proposal.css';
 

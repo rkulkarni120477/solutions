@@ -72,6 +72,24 @@ The home page includes six sample prompts. Open **Prompts** in the left menu to 
 
 Demo accounts are generated per browser session. Clearing cookies loses access to that demo account. Use OIDC for durable enterprise identity.
 
+## Multi-agent presales (RFP responses)
+
+Choose **New RFP response** in the left menu. Paste the RFP text or summary, pick the output formats (Word, PowerPoint or both), optionally attach RFP documents, and submit. Every request goes to the **Orchestrator agent**, which classifies the request and assigns work to the specialist agents:
+
+| Agent | Responsibility |
+|---|---|
+| Orchestrator | Accepts all UI requests (new RFP, answers, change requests, approval, retry, free-text messages), routes them by proposal state and coordinates execution. It never infers approval from free text. |
+| RequirementsCollector | Extracts must/shall requirements and validates scope, timeline, budget, technical environment, integrations, security/compliance and more. If information is missing, the proposal waits in **Awaiting Information** and the UI asks the user. |
+| ProposalCreator | Plans the response format, sections and win themes, generates the solution and coordinates the Estimations, Resources and Documents agents. |
+| Estimations | Effort by activity with contingency that grows with open assumptions. |
+| Resources | Proposed team: roles, headcount and allocation. |
+| DeliveryMethodology | Delivery approach (Agile/hybrid/SAFe), phases and governance. |
+| Documents | Builds the Word document and/or PowerPoint deck with technical diagrams, estimates, team and methodology. |
+
+Flow: **Collecting Requirements → (Awaiting Information) → Drafting → Pending Review → Live**. In **Pending Review** a reviewer (human in the loop) reads the draft files, then either requests changes (another drafting round that uses the comments) or chooses **Approve & publish**. Approval copies the draft files into immutable **Response Documents**, shown under the proposal with signed download links. The agent activity log shows every message exchanged between agents. With a live provider each agent uses the LLM with schema-validated output; in demo mode, or if the LLM call fails, agents use deterministic logic and log a warning.
+
+API: `POST /api/projects/{id}/orchestrator` (free-text entry point), `POST /api/projects/{id}/proposals`, `POST /api/proposals/{id}/answers`, `POST /api/proposals/{id}/review`, `POST /api/proposals/{id}/retry`, `POST /api/response-documents/{id}/download-link`.
+
 ## Configure a live provider
 
 Copy the relevant values into `.env`. Secrets remain backend-only; never use `VITE_` variables for credentials. Restart API and worker after changes.
@@ -114,7 +132,7 @@ Production uses PostgreSQL via `DATABASE_URL=postgresql+psycopg://…`. Migrate 
 .\.venv\Scripts\python.exe -m alembic -c backend/alembic.ini upgrade head
 ```
 
-Development auto-creates tables; production does not. Alembic owns a frozen initial schema and supports downgrade. SQL JSON columns store structured solutions and extracted passages. SQL-backed queue claiming uses PostgreSQL `FOR UPDATE SKIP LOCKED`; no extra broker is necessary for this MVP. Use one worker with SQLite. Jobs abandoned beyond a 20-minute lease become Failed, with interrupted files marked retryable; completed outputs are retained. A provider call may be billed before a crash, so jobs are not silently reissued.
+Development auto-creates missing tables but does not alter existing ones. To upgrade a local SQLite database created before migration `0002` (presales agents) without an `alembic_version` table, back it up and run `alembic -c backend/alembic.ini stamp 0001` then `upgrade head` with `PYTHONPATH=backend`. Production does not auto-create tables. Alembic owns a frozen initial schema and supports downgrade. SQL JSON columns store structured solutions and extracted passages. SQL-backed queue claiming uses PostgreSQL `FOR UPDATE SKIP LOCKED`; no extra broker is necessary for this MVP. Use one worker with SQLite. Jobs abandoned beyond a 20-minute lease become Failed, with interrupted files marked retryable; completed outputs are retained. A provider call may be billed before a crash, so jobs are not silently reissued.
 
 Use `STORAGE_BACKEND=s3`, `S3_BUCKET`, optional `S3_ENDPOINT` for S3-compatible storage. Production S3 writes request AES256 server-side encryption by default. Local MinIO disables that request because no KMS is configured. Object keys are server-generated; file names cannot select filesystem paths. Configure private buckets, encryption, lifecycle, backups and transport in the deployment environment.
 
