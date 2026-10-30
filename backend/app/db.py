@@ -99,6 +99,20 @@ class Artifact(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class JobEvent(Base):
+    __tablename__ = 'job_events'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    job_id: Mapped[str] = mapped_column(ForeignKey('jobs.id', ondelete='CASCADE'), index=True)
+    agent: Mapped[str] = mapped_column(String(80))
+    implementation: Mapped[str] = mapped_column(String(160))
+    agent_type: Mapped[str] = mapped_column(String(30))
+    stage: Mapped[str] = mapped_column(String(40))
+    kind: Mapped[str] = mapped_column(String(50))
+    message: Mapped[str] = mapped_column(String(400))
+    details: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class Proposal(Base):
     """Presales RFP response workflow, including the human approval gate."""
     __tablename__ = 'proposals'

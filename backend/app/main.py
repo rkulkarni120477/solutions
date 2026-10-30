@@ -11,7 +11,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from authlib.integrations.starlette_client import OAuth
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from pydantic import BaseModel, Field
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
 from sqlalchemy.orm import Session as DBSession
 from .config import settings
 from .db import Base, engine, Session, get_db, User, Project, Version, Attachment, Job, Artifact, Audit, Proposal, AgentMessage, ResponseDocument, now, uid
@@ -23,6 +23,8 @@ from .worker import run_forever, ACTIVE
 from .agents import OrchestratorAgent, RoutingError
 from .db import ProposalTemplate
 from .templates import prepare_template, validate_selection
+from .job_control import TERMINAL
+from .execution import record_stage, execution_view
 
 oauth = OAuth()
 if settings.auth_mode == 'oidc':
@@ -102,6 +104,36 @@ def limit_jobs(db, user):
 @app.get('/api/health')
 def health():
     return {'status': 'ok'}
+
+
+@app.post('/api/jobs/{job_id}/cancel')
+def cancel_job(job_id: str, user=Depends(current_user), db: DBSession = Depends(get_db)):
+    job = db.scalar(select(Job).where(Job.id == job_id).with_for_update())
+    if not job:
+        raise HTTPException(404, 'Workflow not found.')
+    owned(db, user, job.project_id)
+    if job.status in TERMINAL:
+        return {'status': job.status, 'cancelled': job.status == 'Cancelled'}
+    record_stage(db, job, 'Cancelled')
+    job.status, job.error, job.updated_at = 'Cancelled', None, now()
+    if job.version_id:
+        db.execute(update(Artifact).where(Artifact.version_id == job.version_id, Artifact.status.in_(['Queued', 'Creating Files'])).values(status='Cancelled', error='Cancelled by user. Retry this file or refresh deliverables to resume.'))
+    if job.proposal_id:
+        proposal = db.get(Proposal, job.proposal_id)
+        if proposal and proposal.status != 'Live':
+            proposal.status, proposal.error, proposal.updated_at = 'Cancelled', 'Cancelled by user.', now()
+    audit(db, user, 'workflow_cancelled', job.id)
+    db.commit()
+    return {'status': 'Cancelled', 'cancelled': True}
+
+
+@app.get('/api/jobs/{job_id}/execution')
+def job_execution(job_id: str, user=Depends(current_user), db: DBSession = Depends(get_db)):
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(404, 'Workflow not found.')
+    owned(db, user, job.project_id)
+    return execution_view(db, job)
 
 
 @app.get('/api/config')
@@ -323,6 +355,8 @@ def new_version(db, project, prompt, preferences, response=None):
     job = Job(project_id=project.id, version_id=version.id, kind='files' if response else 'solution')
     db.add(job)
     project.updated_at = now()
+    db.flush()
+    record_stage(db, job, 'Queued')
     db.commit()
     return job
 
@@ -420,11 +454,13 @@ def retry(artifact_id: str, user=Depends(current_user), db: DBSession = Depends(
     owned(db, user, artifact.project_id)
     no_active_job(db, artifact.project_id)
     limit_jobs(db, user)
-    if artifact.status != 'Failed':
-        raise HTTPException(409, 'Only failed artifacts can be retried.')
+    if artifact.status not in ['Failed', 'Cancelled']:
+        raise HTTPException(409, 'Only failed or cancelled artifacts can be retried.')
     artifact.status = 'Queued'
     job = Job(project_id=artifact.project_id, version_id=artifact.version_id, kind='artifact', artifact_id=artifact.id)
     db.add(job)
+    db.flush()
+    record_stage(db, job, 'Queued')
     audit(db, user, 'artifact_retry', artifact.id)
     db.commit()
     return job

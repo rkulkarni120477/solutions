@@ -88,6 +88,7 @@ def extract(filename: str, data: bytes):
 
 
 def build_context(prompt, preferences, attachments, history, decisions):
+    from .providers import solution_context_fits
     words = set(re.findall(r'\w{3,}', prompt.lower()))
     ranked = []
     for a in attachments:
@@ -95,24 +96,22 @@ def build_context(prompt, preferences, attachments, history, decisions):
             score = sum(1 for word in words if word in passage['text'].lower())
             ranked.append((score, a.filename, index, passage, getattr(a, 'id', 'reference')))
     ranked.sort(key=lambda r: (-r[0], r[1], r[2]))
-    # UTF-8 byte budget is deliberately conservative (<= one byte per token).
-    budget = max(0, settings.max_input_tokens - 6000)
     base = {'current_prompt': prompt, 'preferences': preferences, 'approved_decisions': decisions,
             'history': [{'prompt': v.prompt[:3000], 'summary': (v.response or {}).get('summary', '')[:4000]} for v in history[-4:]],
             'reference_passages': [], 'document_warnings': [f'{a.filename}: {a.warning}' for a in attachments if a.warning]}
-    import json
-    used = len(json.dumps(base, ensure_ascii=False).encode())
-    if used > budget:
-        base['history'] = []
-        used = len(json.dumps(base, ensure_ascii=False).encode())
-    if used > budget:
+    # Account for the exact schema, system message, JSON escaping, separators,
+    # provenance IDs and retry instructions, rather than assuming a fixed reserve.
+    # Use a conservative retrieval note during selection, then update its count.
+    total = len(ranked)
+    base['retrieval_note'] = f'Included {total} of {total} passages using lexical relevance. Excluded passages have not been reviewed.'
+    while base['history'] and not solution_context_fits(base):
+        base['history'].pop(0)
+    if not solution_context_fits(base):
         raise ValueError('Prompt and preferences exceed the configured input budget. Shorten the prompt or increase MAX_INPUT_TOKENS.')
     for _, filename, index, p, attachment_id in ranked:
         source = {'id': f'{filename}::{attachment_id}::{p["reference"]}::chunk-{index + 1}', 'filename': filename, **p}
-        size = len(json.dumps(source, ensure_ascii=False).encode())
-        if used + size > budget:
-            continue
         base['reference_passages'].append(source)
-        used += size
+        if not solution_context_fits(base):
+            base['reference_passages'].pop()
     base['retrieval_note'] = f'Included {len(base["reference_passages"])} of {len(ranked)} passages using lexical relevance. Excluded passages have not been reviewed.'
     return base

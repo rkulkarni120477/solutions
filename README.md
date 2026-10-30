@@ -74,6 +74,14 @@ The home page includes six sample prompts. Open **Prompts** in the left menu to 
 
 Demo accounts are generated per browser session. Clearing cookies loses access to that demo account. Use OIDC for durable enterprise identity.
 
+## Reset a running workflow
+
+Click **Reset** in the running workflow box to stop the current job and return to a blank **New solution** page. The project, references, previous versions and completed files remain available in My projects. The cancellation endpoint checks project ownership, is safe to repeat, and leaves already finished jobs unchanged. Cancelled jobs are terminal; unfinished files are marked Cancelled and can be explicitly retried. A cancelled RFP can also be retried from its project.
+
+Workers supervise each job in a separate process, checking persisted cancellation while the model or exporter is running. Reset terminates that local process tree and frees the worker for subsequent requests. An already accepted provider request may continue remotely and may still be billed; cancellation prevents its late result from advancing the local workflow. No job is automatically reissued.
+
+API: `POST /api/jobs/{id}/cancel`.
+
 ## Multi-agent presales (RFP responses)
 
 Choose **New RFP response** in the left menu. Paste the RFP text or summary, pick the output formats (Word, PowerPoint or both), optionally attach RFP documents, and submit. Every request goes to the **Orchestrator agent**, which classifies the request and assigns work to the specialist agents:
@@ -116,7 +124,7 @@ Copy the relevant values into `.env`. Secrets remain backend-only; never use `VI
 | Azure OpenAI | `LLM_PROVIDER=azure`, `AZURE_OPENAI_ENDPOINT=https://…`, `AZURE_OPENAI_API_KEY`, `LLM_MODEL=<deployment-name>`, compatible `AZURE_OPENAI_API_VERSION` |
 | Amazon Bedrock | `LLM_PROVIDER=bedrock`, `LLM_MODEL=<model-or-inference-profile-ID>`, `AWS_REGION`, AWS credential chain with Converse/model invocation permission |
 
-The adapter requests JSON and validates every response against the Pydantic schema. It rejects unknown citation IDs. There are at most two provider attempts per call with fixed timeouts; live diagram validation may request one bounded repair. Invalid responses fail with actionable errors; no live-provider failure silently falls back to demo. Choose token limits compatible with your model. The input budget uses UTF-8 bytes as a conservative token upper bound, with reserved schema/system overhead; lexical passage retrieval and four prior version summaries keep context bounded.
+The adapter uses schema-shaped tool output for Anthropic Claude models on Bedrock and JSON mode for the other adapters, then validates every response against the Pydantic schema. Output-token truncation is detected explicitly and retried once with a shorter response instruction; schema failures receive bounded field-level feedback. Raw model responses are not logged. It rejects unknown citation IDs. There are at most two provider attempts per call with fixed timeouts; live diagram validation may request one bounded repair. Invalid responses fail with actionable errors; no live-provider failure silently falls back to demo. Choose token limits compatible with your model. The input budget uses UTF-8 bytes as a conservative token upper bound, accounting for the complete serialized schema, system instructions, provenance, JSON escaping and retry overhead before selecting reference passages. Lexical passage retrieval and up to four prior version summaries keep context bounded; excluded passages are explicitly identified as unreviewed.
 
 API references: [OpenAI JSON output](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=chat), [Bedrock Converse](https://docs.aws.amazon.com/boto3/latest/reference/services/bedrock-runtime/client/converse.html), [Authlib Starlette OIDC](https://docs.authlib.org/en/v1.5.2/client/starlette.html).
 

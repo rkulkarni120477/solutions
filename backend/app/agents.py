@@ -12,6 +12,8 @@ from .config import settings
 from .context import build_context
 from .db import AgentMessage, Attachment, Version, Artifact, now
 from .providers import generate, structured, ProviderError
+from .job_control import ensure_running
+from .execution import emit, record_stage
 from .schemas import (Diagram, EstimationResult, Estimate, Methodology, MethodologyPlan, MissingInformation, Phase,
                       ProposalPlan, RequirementItem, RequirementsAssessment, ResourcePlan, ResourceRole, Section, Solution)
 
@@ -333,6 +335,7 @@ class ProposalCreatorAgent:
         preferences = {**(proposal.preferences or {}), 'outputs': OUTPUTS}
         prompt = self.prompt(proposal, assessment, plan)
         context = build_context(prompt, preferences, attachments, history, project.decisions)
+        emit('context_built', 'Reference context assembled.', {'selected_passages':len(context['reference_passages']),'available_passages':sum(len(a.passages) for a in attachments),'history_versions':len(context['history'])})
         stage(db, job, 'Generating Solution')
         self.bus.send(self.name, None, 'info', 'Drafting the solution narrative, architecture and diagrams.')
         solution = generate(context)
@@ -349,6 +352,7 @@ class ProposalCreatorAgent:
         version = Version(project_id=project.id, number=number, prompt=('RFP proposal draft: ' + ' '.join(proposal.request.split()))[:16000], preferences=preferences,
                           response=solution.model_dump(), provider=settings.llm_provider,
                           context_sources=[{'id': r['id'], 'filename': r['filename'], 'reference': r['reference']} for r in context['reference_passages']])
+        ensure_running(db, job, lock=True)
         db.add(version)
         db.flush()
         job.version_id, proposal.draft_version_id = version.id, version.id
@@ -398,6 +402,7 @@ class OrchestratorAgent:
         self.db.add(job)
         self.db.get(Project, proposal.project_id).updated_at = now()
         self.db.flush()
+        record_stage(self.db, job, 'Queued')
         self.assign(proposal, agent, reason)
         return job
 
@@ -472,9 +477,9 @@ class OrchestratorAgent:
         return len(written)
 
     def retry(self, proposal):
-        if proposal.status != 'Failed':
-            raise RoutingError(409, 'Only a failed proposal can be retried.')
-        return self._queue(proposal, 'RequirementsCollector' if not proposal.requirements else 'ProposalCreator', 'Intent: retry after failure. Restarting the workflow.')
+        if proposal.status not in ['Failed', 'Cancelled']:
+            raise RoutingError(409, 'Only a failed or cancelled proposal can be retried.')
+        return self._queue(proposal, 'RequirementsCollector' if not proposal.requirements else 'ProposalCreator', 'Intent: retry a stopped workflow. Restarting the workflow.')
 
     def message(self, project_id, text, formats, preferences):
         """Route a free-text UI message to the appropriate agent based on proposal state."""

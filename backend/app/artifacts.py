@@ -20,12 +20,13 @@ from .db import Artifact, Proposal
 from .storage import storage
 from .presentation import create_presentation
 from .templates import template_for_version, prepare_template
+from .job_control import ensure_running
 
 
 MIMES = {'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'pdf': 'application/pdf', 'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation', 'zip': 'application/zip', 'svg': 'image/svg+xml', 'png': 'image/png', 'jpg': 'image/jpeg', 'mmd': 'text/plain'}
 
 
-def plan_artifacts(db, version, documents=None):
+def plan_artifacts(db, version, documents=None, job=None):
     """Plan files for a version. `documents` is the explicit proposal format selection."""
     outputs = version.preferences.get('outputs', [])
     solution = Solution.model_validate(version.response)
@@ -53,6 +54,8 @@ def plan_artifacts(db, version, documents=None):
         a = Artifact(project_id=version.project_id, version_id=version.id, kind=kind, filename=name)
         db.add(a)
         result.append(a)
+    if job is not None:
+        ensure_running(db, job, lock=True)
     db.commit()
     return result
 

@@ -17,3 +17,9 @@
 .modal .delete-error{color:#a84e42}
 @media(max-width:850px){.project-table-head,.project-row{grid-template-columns:minmax(0,1fr) 70px 72px}}
 @media(max-width:620px){.project-table-head,.project-row{grid-template-columns:minmax(0,1fr) 56px 64px}.project-row-actions{gap:0}.project-open{gap:8px}}
+
+.job-panel .job-header{display:grid;grid-template-columns:42px minmax(0,1fr) auto;gap:15px}
+.job-panel .reset-workflow{align-self:start;background:white;border-color:#efb4b4;color:#b91c1c;white-space:nowrap}
+.job-panel .reset-workflow:hover:not(:disabled){background:#fff1f1;border-color:#dc2626}
+.file-status.cancelled{color:#9a7760}
+@media(max-width:620px){.job-panel .job-header{grid-template-columns:42px minmax(0,1fr)}.job-panel .reset-workflow{grid-column:2;justify-self:start}}
