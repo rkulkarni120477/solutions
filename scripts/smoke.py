@@ -3,6 +3,8 @@ import io
 import sys
 import time
 import zipfile
+import os
+from pathlib import Path
 import httpx
 from docx import Document
 from pypdf import PdfReader
@@ -55,7 +57,17 @@ try:
         if ext=='docx':assert Document(io.BytesIO(data)).paragraphs
         elif ext=='pdf':assert len(PdfReader(io.BytesIO(data)).pages)>0
         elif ext=='xlsx':assert load_workbook(io.BytesIO(data)).active['D9'].value=='=SUM(D4:D8)'
-        elif ext=='pptx':assert len(Presentation(io.BytesIO(data)).slides)>1
+        elif ext=='pptx':
+            presentation=Presentation(io.BytesIO(data))
+            headings='\n'.join(shape.text for slide in presentation.slides for shape in slide.shapes if shape.has_text_frame)
+            for heading in ['Executive summary','Proposed solution','Estimation overview','Delivery roadmap','Assumptions for review']:
+                assert heading in headings
+            assert any(shape.has_table for slide in presentation.slides for shape in slide.shapes)
+            assert any(shape.has_chart for slide in presentation.slides for shape in slide.shapes)
+            if os.environ.get('SMOKE_CAPTURE_DIR'):
+                capture=Path(os.environ['SMOKE_CAPTURE_DIR'])
+                capture.mkdir(parents=True,exist_ok=True)
+                (capture/artifact['filename']).write_bytes(data)
         elif ext in ['png','jpg']:
             img=Image.open(io.BytesIO(data));assert img.width>100 and img.height>100
         elif ext=='svg':assert b'<svg' in data

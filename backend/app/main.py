@@ -284,6 +284,22 @@ def update_estimates(project_id: str, version_id: str, body: EstimateUpdate, use
     return job
 
 
+@app.post('/api/projects/{project_id}/versions/{version_id}/refresh-files', status_code=202)
+def refresh_files(project_id: str, version_id: str, user=Depends(current_user), db: DBSession = Depends(get_db)):
+    project = owned(db, user, project_id)
+    limit_jobs(db, user)
+    version = db.get(Version, version_id)
+    if not version or version.project_id != project_id or not version.response:
+        raise HTTPException(404, 'A completed solution response is required to refresh deliverables.')
+    job = new_version(db, project, 'Deliverable refresh: ' + version.prompt[:15000],
+                      version.preferences, Solution.model_validate(version.response).model_dump())
+    refreshed = db.get(Version, job.version_id)
+    refreshed.provider, refreshed.context_sources = version.provider, version.context_sources
+    audit(db, user, 'deliverables_refreshed', refreshed.id)
+    db.commit()
+    return job
+
+
 class DiagramUpdate(BaseModel):
     index: int = Field(ge=0, le=4)
     source: str = Field(min_length=5, max_length=20000)

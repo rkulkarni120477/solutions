@@ -14,7 +14,7 @@ class Preferences(Strict):
     scale: str = Field(default='', max_length=1500)
     constraints: str = Field(default='', max_length=2000)
     detail: Literal['Concise', 'Standard', 'Detailed'] = 'Detailed'
-    outputs: list[Literal['solution', 'diagrams', 'estimates', 'plan', 'presentation', 'custom']] = Field(default_factory=lambda: ['solution', 'diagrams', 'estimates', 'plan'], max_length=6)
+    outputs: list[Literal['solution', 'diagrams', 'estimates', 'plan', 'presentation', 'custom']] = Field(default_factory=lambda: ['solution', 'diagrams', 'estimates', 'plan', 'presentation'], max_length=6)
     custom_deliverables: str = Field(default='', max_length=1500)
 
 

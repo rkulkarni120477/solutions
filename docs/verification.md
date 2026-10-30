@@ -1,5 +1,13 @@
 # Local verification — October 29, 2026
 
+## Presentation export update
+
+The response package now always includes a structured PowerPoint briefing. The expanded suite passes **18 backend tests**, including automatic PPTX inclusion when the flag is omitted, native estimate tables/chart values, calculated costs, missing-data disclosures, pagination, shape bounds, ownership checks, and export refresh without a provider call. The frontend production build passes with the included-presentation notice and Refresh deliverables action.
+
+A representative deck with a real rendered architecture was opened read-only and exported by installed Microsoft PowerPoint. All **25 slides** were visually inspected after consolidating sparse continuation layouts. PowerPoint detected **zero text-box overflows**, and OOXML/relationship/chart validation passed. These checks validate the generator against the sample and focused edge cases; arbitrary customer content can still require visual review. Use `scripts/render-presentation.ps1` for local Windows/PowerPoint rendering.
+
+Existing responses can use **Files → Refresh deliverables** to generate new files in a new version without another LLM response. Their earlier artifacts are preserved.
+
 ## Passed
 
 - **14 backend tests**: authentication/ownership, cross-origin protection, context retrieval/budgets/provenance, isolated document extraction, scanned-PDF warnings, decimal estimate totals, real document parsing, spreadsheet formula protection, durable queue processing, immutable versions, signed downloads, partial failures and artifact retries, provider failures and unsafe Mermaid rejection.

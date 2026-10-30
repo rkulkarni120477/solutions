@@ -10,8 +10,6 @@ from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
-from pptx import Presentation
-from pptx.util import Inches as SlideInches, Pt as SlidePt
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.pagesizes import A4
@@ -20,6 +18,7 @@ from .config import settings
 from .schemas import Solution, calculate
 from .db import Artifact
 from .storage import storage
+from .presentation import create_presentation
 
 
 MIMES = {'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'pdf': 'application/pdf', 'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation', 'zip': 'application/zip', 'svg': 'image/svg+xml', 'png': 'image/png', 'jpg': 'image/jpeg', 'mmd': 'text/plain'}
@@ -27,13 +26,12 @@ MIMES = {'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml
 
 def plan_artifacts(db, version):
     outputs = version.preferences.get('outputs', [])
-    kinds = []
+    # A stakeholder briefing is a standard part of every response package.
+    kinds = ['pptx']
     if 'solution' in outputs:
         kinds += ['docx', 'pdf']
     if 'estimates' in outputs:
         kinds += ['xlsx']
-    if 'presentation' in outputs:
-        kinds += ['pptx']
     solution = Solution.model_validate(version.response)
     for i, _ in enumerate(solution.diagrams):
         kinds += [f'diagram:{i}:{ext}' for ext in ['mmd', 'svg', 'png', 'jpg']]
@@ -42,7 +40,7 @@ def plan_artifacts(db, version):
     result = []
     for kind in kinds:
         parts = kind.split(':')
-        name = f'architecture-{int(parts[1])+1}.{parts[2]}' if len(parts) == 3 else f'solution-v{version.number}.{kind}'
+        name = f'architecture-{int(parts[1])+1}.{parts[2]}' if len(parts) == 3 else f'project-briefing-v{version.number}.pptx' if kind == 'pptx' else f'solution-v{version.number}.{kind}'
         a = Artifact(project_id=version.project_id, version_id=version.id, kind=kind, filename=name)
         db.add(a)
         result.append(a)
@@ -75,7 +73,9 @@ def text_blocks(s):
     yield 'Calculated estimate totals', json.dumps(calculate(s), indent=2)
 
 
-def create_document(kind, solution, provider, diagrams=None):
+def create_document(kind, solution, provider, diagrams=None, metadata=None):
+    if kind == 'pptx':
+        return create_presentation(solution, provider, diagrams, metadata)
     s = solution
     buffer = io.BytesIO()
     label = 'DEMO — illustrative template, not a live LLM response' if provider == 'demo' else f'Generated with {provider}; architect review required'
@@ -160,35 +160,6 @@ def create_document(kind, solution, provider, diagrams=None):
             row[1].alignment = Alignment(wrap_text=True, vertical='top')
             basis.row_dimensions[row[0].row].height = 60
         wb.save(buffer)
-    elif kind == 'pptx':
-        prs = Presentation()
-        prs.slide_width = SlideInches(13.333)
-        prs.slide_height = SlideInches(7.5)
-        def slide(title, body):
-            page = prs.slides.add_slide(prs.slide_layouts[6])
-            box = page.shapes.add_textbox(SlideInches(.65),SlideInches(.5),SlideInches(12),SlideInches(1))
-            p = box.text_frame.paragraphs[0]
-            p.text = title[:110]
-            p.font.size = SlidePt(28)
-            box = page.shapes.add_textbox(SlideInches(.7),SlideInches(1.6),SlideInches(11.9),SlideInches(5.2))
-            box.text_frame.word_wrap = True
-            for i, line in enumerate(body.split('\n')):
-                p = box.text_frame.paragraphs[0] if i == 0 else box.text_frame.add_paragraph()
-                p.text = line
-                p.font.size = SlidePt(17)
-            return page
-        slide(s.title, label)
-        for heading, text in text_blocks(s):
-            # Bound content per slide; preserve full text through continuation slides.
-            parts = [text[i:i+850] for i in range(0, len(text), 850)] or ['']
-            for i, part in enumerate(parts):
-                slide(heading + (f' ({i+1}/{len(parts)})' if len(parts)>1 else ''), part)
-        for title, png in diagrams or []:
-            page = slide(title, '')
-            img = Image.open(io.BytesIO(png))
-            width = min(11.8, 4.8 * img.width / img.height)
-            page.shapes.add_picture(io.BytesIO(png), SlideInches((13.333-width)/2), SlideInches(1.7), width=SlideInches(width))
-        prs.save(buffer)
     else:
         raise ValueError('Unknown artifact format')
     return buffer.getvalue()
@@ -222,4 +193,4 @@ def build_artifact(db, artifact, version, cache):
         if a.status == 'Completed' and a.kind.endswith(':png') and a.key:
             idx = int(a.kind.split(':')[1])
             diagrams.append((s.diagrams[idx].title, storage.get(a.key)))
-    return create_document(artifact.kind, s, version.provider, diagrams)
+    return create_document(artifact.kind, s, version.provider, diagrams, {'project_id': version.project_id, 'version': version.number, 'created_at': version.created_at.isoformat()})

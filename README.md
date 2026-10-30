@@ -59,13 +59,15 @@ On macOS/Linux use `.venv/bin/python`, `npm`, and `export PYTHONPATH=backend`. C
 
 ## Acceptance walkthrough
 
+The home page includes six sample prompts. Open **Prompts** in the left menu to browse 18 templates across Architecture & design, Cloud & modernization, AI & knowledge, Data & integrations, Security & resilience, and Delivery & estimates. Search or filter by category, expand the full text, copy a prompt, or choose **Use this prompt** to fill a new solution with matching output selections. Replace bracketed details and review before submitting. Browsing the library and returning to Workspace preserves your current draft/project; choosing a template from a saved project starts a new solution.
+
 1. Sign into the demo workspace. Select an example or describe a requirement.
-2. Attach a UTF-8 Markdown/TXT, PDF or DOCX reference. Set cloud, constraints and desired outputs under Advanced Options. To exercise all formats, enable Presentation too.
+2. Attach a UTF-8 Markdown/TXT, PDF or DOCX reference. Set cloud, constraints and desired outputs under Advanced Options. Every output package automatically includes a PowerPoint project briefing.
 3. Submit and watch **Queued → Building Context → Generating Solution → Creating Files → Completed**. Reopen the project from Recent projects if you navigate away.
 4. Review the narrative, reference IDs, assumptions and unresolved questions. Approve an assumption to include it in subsequent context.
 5. Open Diagrams for a server-rendered PNG. Download SVG/PNG/JPG/Mermaid source. Edit the source and save a new version.
 6. Edit effort/rates, currency, contingency and FTE under Estimates. Save to calculate totals on the backend and generate a new immutable revision. Missing rates yield **Rates required**, not an invented price.
-7. Download DOCX, PDF, XLSX, optional PPTX and the ZIP package from Files. Links appear only for completed files. A failed export has its own retry action; successful files remain available.
+7. Download DOCX, PDF, XLSX, the included PPTX briefing and the ZIP package from Files. The 16:9 briefing covers the executive summary, proposed solution, architecture, editable estimate tables/chart, calculated costs when rates are supplied, delivery roadmap, assumptions and decisions. Unrequested or missing estimates/diagrams are explicitly identified. Links appear only for completed files. A failed export has its own retry action; successful files remain available. For an existing response, choose **Refresh deliverables** in Files to create updated exports as a new version without another LLM response. Earlier versions remain unchanged.
 8. Ask a follow-up. Switch versions to reopen previous outputs. The saved context includes prior prompts/summaries, approved decisions and relevant reference passages.
 
 Demo accounts are generated per browser session. Clearing cookies loses access to that demo account. Use OIDC for durable enterprise identity.
