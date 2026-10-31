@@ -98,10 +98,17 @@ def validate_response(model, text):
 def validate_solution(text):
     try:
         return validate_response(SolutionDraft, text).solution()
-    except ValidationError:
+    except ValidationError as draft_error:
         # Preserve compatibility with complete responses from older adapters.
         # Unknown/invalid fields still fail full Solution validation.
-        return validate_response(Solution, text)
+        fenced = re.fullmatch(r'\s*```(?:json)?\s*\n(.*?)\n```\s*', text, re.DOTALL | re.IGNORECASE)
+        try:
+            data = json.loads(fenced.group(1) if fenced else text)
+        except (ValueError, TypeError):
+            raise draft_error
+        if isinstance(data, dict) and 'diagrams' in data and 'artifact_requests' in data:
+            return validate_response(Solution, text)
+        raise draft_error
 
 
 def checked_sources(solution, context):

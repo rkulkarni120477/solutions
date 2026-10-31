@@ -41,19 +41,32 @@ def test_bedrock_truncated_tool_output_is_not_accepted_as_success(bedrock, monke
         providers._complete('Return JSON.',json.dumps({'schema':{'type':'object'},'input':{}}))
 
 
-def test_truncation_retries_a_shorter_response_within_input_budget(bedrock, monkeypatch):
+def test_truncation_switches_to_validated_parts_within_input_budget(bedrock, monkeypatch):
     context=build_context('Design an enterprise portal',Preferences().model_dump(),[],[],[])
     calls=[]
     def complete(system,payload):
         assert providers.request_size(system,payload)<=settings.max_input_tokens
-        calls.append(json.loads(payload))
-        if len(calls)==1:
+        data=json.loads(payload)
+        calls.append(data)
+        title=data['schema']['title']
+        if title=='SolutionDraft':
             raise providers.OutputLimitError('Output limit')
-        assert 'shorter complete response' in calls[1]['repair']
-        return sample_solution().model_dump_json()
+        from app.solution_draft import SolutionOutline, DetailedSection, DeliverySeed
+        s=sample_solution()
+        if title=='SolutionOutline':
+            values={key:value for key,value in s.model_dump().items() if key in SolutionOutline.model_fields}
+            values['section_topics']=[{'title':'Proposed solution','classification':'recommendation'},{'title':'Security and risks','classification':'requires validation'}]
+            return SolutionOutline.model_validate(values).model_dump_json()
+        if title=='DetailedSection':
+            topic=data['input']['topic']
+            return DetailedSection(**topic,content='Complete solution-specific detail with boundaries, dependencies and decisions.',sources=[]).model_dump_json()
+        return DeliverySeed(estimates=s.estimates,phases=s.phases).model_dump_json()
     monkeypatch.setattr(providers,'_complete',complete)
     result=providers.generate(context)
-    assert result.title and len(calls)==2
+    assert [section.title for section in result.sections]==['Proposed solution','Security and risks']
+    assert [call['schema']['title'] for call in calls]==['SolutionDraft','SolutionOutline','DetailedSection','DetailedSection','DeliverySeed']
+    assert result.estimates and result.diagrams==[]
+    assert all(call['input']['context']==context for call in calls[1:])
 
 
 def test_repair_identifies_invalid_fields_without_logging_response_content(bedrock,monkeypatch,caplog):
@@ -84,7 +97,7 @@ def test_repeated_truncation_has_specific_error_instead_of_schema_error(bedrock,
     monkeypatch.setattr(providers,'_complete',complete)
     with pytest.raises(providers.ProviderError,match='shorter retry'):
         providers.generate(context)
-    assert len(calls)==2
+    assert len(calls)==3  # One draft, then two bounded outline attempts.
 
 
 def test_agent_schema_failure_gets_targeted_repair(bedrock,monkeypatch):
