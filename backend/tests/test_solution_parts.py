@@ -27,11 +27,11 @@ def test_primary_contract_excludes_delegated_expensive_outputs(monkeypatch):
 def test_draft_validation_retry_does_not_request_delegated_legacy_fields():
     from pydantic import ValidationError
     values={key:value for key,value in sample_solution().model_dump().items() if key in SolutionDraft.model_fields}
-    values['sections'][0]['content']='x'*2601
+    values['sections'][0]['classification']='unsupported'
     with pytest.raises(ValidationError) as error:
         providers.validate_solution(json.dumps(values))
     repair=providers.retry_instruction(error.value)
-    assert 'sections.0.content: string_too_long' in repair
+    assert 'sections.0.classification: literal_error' in repair
     assert 'diagrams' not in repair and 'artifact_requests' not in repair
 
 
@@ -88,3 +88,40 @@ def test_parts_retry_invalid_citations_without_accepting_them(monkeypatch):
     result=providers.generate(ctx)
     assert len(attempts)==2 and result.sections[0].sources==[]
     assert result.estimates==[] and result.phases==[]
+
+
+def test_complete_longer_draft_preserves_content_without_forcing_legacy_fields():
+    values={key:value for key,value in sample_solution().model_dump().items() if key in SolutionDraft.model_fields}
+    values['sections'][0]['content']='x'*2601
+    result=providers.validate_solution(json.dumps(values))
+    assert result.sections[0].content=='x'*2601
+    assert result.diagrams==[]
+
+
+def test_validation_diagnostics_do_not_expose_model_values_or_unknown_keys():
+    from pydantic import ValidationError
+    values={key:value for key,value in sample_solution().model_dump().items() if key in SolutionDraft.model_fields}
+    values['PRIVATE_UNKNOWN_FIELD']='PRIVATE_MODEL_VALUE'
+    with pytest.raises(ValidationError) as error:
+        SolutionDraft.model_validate(values)
+    details=providers.validation_details(error.value,providers.solution_schema())
+    assert details=='<field>: extra_forbidden'
+    assert 'PRIVATE' not in details
+    assert providers.validation_details(ValueError('PRIVATE_MODEL_VALUE'),providers.solution_schema())=='ValueError'
+
+
+def test_repeated_draft_schema_failure_switches_to_parts(monkeypatch):
+    monkeypatch.setattr(settings,'llm_provider','bedrock')
+    monkeypatch.setattr(settings,'llm_model','test')
+    monkeypatch.setattr(providers.time,'sleep',lambda _:None)
+    context=build_context('Design an enterprise portal',Preferences(outputs=['solution']).model_dump(),[],[],[])
+    calls=[]
+    def complete(system,payload):
+        name=json.loads(payload)['schema']['title'];calls.append(name)
+        if name=='SolutionDraft':return '{"invalid":"response"}'
+        if name=='SolutionOutline':return outline().model_dump_json()
+        return DetailedSection(title='Solution architecture',content='Complete validated section.',classification='recommendation',sources=[]).model_dump_json()
+    monkeypatch.setattr(providers,'_complete',complete)
+    result=providers.generate(context)
+    assert result.sections[0].content=='Complete validated section.'
+    assert calls==['SolutionDraft','SolutionDraft','SolutionOutline','DetailedSection']

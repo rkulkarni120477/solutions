@@ -95,6 +95,27 @@ def validate_response(model, text):
     return model.model_validate_json(fenced.group(1) if fenced else text)
 
 
+def validation_details(error, schema):
+    """Field paths and error codes only; never persist model values or unknown keys."""
+    if not isinstance(error, ValidationError):
+        return type(error).__name__
+    known = set()
+    def visit(value):
+        if isinstance(value, dict):
+            known.update(value.get('properties', {}))
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+    visit(schema)
+    messages = []
+    for issue in error.errors(include_input=False, include_url=False)[:8]:
+        path = '.'.join(str(part) if isinstance(part, int) or part in known else '<field>' for part in issue['loc'])
+        messages.append((path or 'response') + ': ' + issue['type'])
+    return '; '.join(messages)
+
+
 def validate_solution(text):
     try:
         return validate_response(SolutionDraft, text).solution()
@@ -108,6 +129,16 @@ def validate_solution(text):
             raise draft_error
         if isinstance(data, dict) and 'diagrams' in data and 'artifact_requests' in data:
             return validate_response(Solution, text)
+        errors = draft_error.errors(include_input=False, include_url=False)
+        # Draft length targets guide the model's budget; a complete result that
+        # fits the provider limit may retain longer text under the full product
+        # schema. Never discard text or relax enum/type/citation validation.
+        if isinstance(data, dict) and set(data) <= set(SolutionDraft.model_fields) and errors and all(e['type'] in ['string_too_long','too_long'] for e in errors):
+            solution = Solution.model_validate({**data,'diagrams':[],'artifact_requests':[]})
+            if not solution.sections:
+                raise draft_error
+            emit('solution_draft_expanded', 'Complete draft validated with longer sections; all response content was preserved.')
+            return solution
         raise draft_error
 
 
@@ -134,7 +165,7 @@ def selected_outputs(solution, context):
 def generate_parts(context):
     """Recover truncation using complete independently validated model results."""
     emit('solution_split_started', 'Output limit reached; generating the solution in smaller validated parts.')
-    outline = structured(SolutionOutline, SYSTEM + '\nReturn only a compact outline and planning metadata. section_topics contains titles and classifications, not section bodies. Cover the complete requested solution scope; every topic will be generated separately.',
+    outline = structured(SolutionOutline, SYSTEM + '\nReturn only a compact outline and planning metadata. Summary at most 1000 characters, at most 6 assumptions and 4 questions of 120 characters each, notes at most 300 characters each. section_topics contains titles and classifications, not section bodies. Cover the complete requested solution scope; every topic will be generated separately.',
                          {'context':context})
     sections = []
     for index, topic in enumerate(outline.section_topics):
@@ -420,7 +451,7 @@ def structured(model, system, payload, validate=None):
         except (ValueError, KeyError, TypeError) as exc:
             last = f'Provider response did not match the {model.__name__} schema after validation and a targeted retry. Retry with a more concise request.'
             log.warning('provider_schema_validation_failed schema=%s attempt=%s', model.__name__, attempt + 1)
-            emit('schema_validation_failed', 'Agent output did not pass schema validation.', {'schema':model.__name__,'attempt':attempt+1})
+            emit('schema_validation_failed', 'Agent output did not pass schema validation.', {'schema':model.__name__,'attempt':attempt+1,'validation_details':validation_details(exc,schema)})
             payload_text = serialize(retry_instruction(exc))
         except Exception:
             last = 'Provider request failed or timed out. Check endpoint, IAM permissions, model access and network connectivity.'
@@ -451,6 +482,7 @@ def generate(context, repair=None):
     if request_size(SYSTEM, payload_text) > settings.max_input_tokens:
         raise ProviderError('Context exceeds the conservative input-token budget. Shorten the prompt, remove references or increase MAX_INPUT_TOKENS within your model limits.')
     last = None
+    split_after_validation = False
     for attempt in range(2):
         try:
             if request_size(SYSTEM, payload_text) > settings.max_input_tokens:
@@ -467,14 +499,19 @@ def generate(context, repair=None):
             if code not in [429, 500, 502, 503, 504]:
                 raise ProviderError(f'Provider returned HTTP {code}. Check model/deployment, credentials and account access.') from None
             last = f'Provider returned HTTP {code}. Check quota and retry shortly.'
+            split_after_validation = False
         except (ValueError, KeyError, TypeError) as exc:
             last = 'Provider response did not match the solution schema after validation and a targeted retry. Retry with a more concise request.'
             log.warning('provider_schema_validation_failed schema=Solution attempt=%s', attempt + 1)
-            emit('schema_validation_failed', 'Solution output did not pass schema validation.', {'schema':'Solution','attempt':attempt+1})
+            emit('schema_validation_failed', 'Solution output did not pass schema validation.', {'schema':'SolutionDraft','attempt':attempt+1,'validation_details':validation_details(exc,solution_schema())})
             payload_text = solution_payload(context, retry_instruction(exc))
+            split_after_validation = True
         except Exception:
             last = 'Provider request failed or timed out. Check endpoint, IAM permissions, model access and network connectivity.'
+            split_after_validation = False
         if attempt == 0:
             emit('provider_retry', 'Retrying the model request.', {'attempt':2})
             time.sleep(1)
+    if split_after_validation:
+        return generate_parts(context)
     raise ProviderError(last)

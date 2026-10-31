@@ -43,6 +43,7 @@ async def lifespan(app):
     if settings.embedded_worker:
         thread = threading.Thread(target=run_forever, args=(stop,), daemon=True)
         thread.start()
+    app.state.worker_thread = thread
     yield
     stop.set()
     if thread:
@@ -104,7 +105,9 @@ def limit_jobs(db, user):
 
 @app.get('/api/health')
 def health():
-    return {'status': 'ok'}
+    thread = getattr(app.state, 'worker_thread', None)
+    return {'status': 'ok', 'worker_mode': 'embedded' if settings.embedded_worker else 'external',
+            'worker_alive': bool(thread and thread.is_alive())}
 
 
 @app.post('/api/jobs/{job_id}/cancel')

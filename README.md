@@ -197,6 +197,8 @@ Fixed-price planning uses expected effort at supplied rates plus contingency for
 
 ## Recovering model output limits
 
-The initial provider request now uses a bounded **SolutionDraft** contract: at most eight focused narrative sections and compact effort/phase seeds. Diagram code, long diagram explanations, RACII, resource planning, methodology objects and commercial calculations are produced by their specialist agents instead of being duplicated in that response. Normal presentation/plan runs now also invoke Resources and Methodology agents explicitly.
+The initial provider request now uses a bounded **SolutionDraft** contract targeting eight focused narrative sections and compact effort/phase seeds. Complete responses with longer text are preserved when they still satisfy the full product schema; enum, type and citation checks remain strict. Diagram code, long diagram explanations, RACII, resource planning, methodology objects and commercial calculations are produced by their specialist agents instead of being duplicated in that response. Normal presentation/plan runs now also invoke Resources and Methodology agents explicitly.
 
 If the draft hits the provider output limit, generation switches immediately to **SolutionOutline**, one **DetailedSection** request per planned section, and a **DeliverySeed** request. Each piece is independently schema-validated and citations must match the selected reference IDs. The full solution is assembled only after all pieces succeed; truncated JSON is never accepted. Backend execution details show split-generation and section-completion events. This recovery keeps the configured model token limit unchanged.
+
+Repeated draft-validation failures also switch to the smaller-part generation path after a targeted retry. Draft validation errors retain their actual field locations instead of requesting fields belonging only to the older monolithic response.
