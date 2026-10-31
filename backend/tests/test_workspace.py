@@ -135,7 +135,7 @@ def test_end_to_end_versions_files_retry_and_signed_downloads(workspace,monkeypa
     assert v['context_sources'][0]['filename']=='requirements.md'
     assert 'Use enterprise SSO' in v['response']['sections'][-1]['content']
     assert all(a['status']=='Completed' for a in v['artifacts'])
-    assert len(v['artifacts'])==9
+    assert len(v['artifacts'])==5+4*len(v['response']['diagrams'])
     for a in v['artifacts']:
         assert bob.post(f'/api/artifacts/{a["id"]}/download-link').status_code==404
         url=alice.post(f'/api/artifacts/{a["id"]}/download-link').json()['url']

@@ -18,9 +18,10 @@ from .config import settings
 from . import agents
 from .job_control import JobCancelled, ensure_running, TERMINAL
 from .execution import observe_job, emit, add_event, record_stage
+from .diagrams import DiagramsAgent
 
 log = logging.getLogger(__name__)
-ACTIVE = ['Building Context', 'Generating Solution', 'Creating Files', *agents.STAGES]
+ACTIVE = ['Building Context', 'Generating Solution', 'Designing Diagrams', 'Creating Files', *agents.STAGES]
 
 
 def stage(db, job, status):
@@ -34,6 +35,10 @@ def stage(db, job, status):
 def validate_diagrams(db, job, context, solution):
     """Validate/repair diagrams once before publishing narrative. Renderer outages leave
     exports independently failed rather than discarding a successful solution."""
+    if solution.diagrams or any(o in context.get('preferences', {}).get('outputs', []) for o in ['diagrams', 'presentation']):
+        stage(db, job, 'Designing Diagrams')
+        DiagramsAgent().run(context, solution)
+        ensure_running(db, job)
     for index, diagram in enumerate(solution.diagrams):
         ensure_running(db, job)
         job.updated_at = now()
@@ -48,11 +53,9 @@ def validate_diagrams(db, job, context, solution):
             if settings.llm_provider != 'demo':
                 try:
                     emit('diagram_repair', 'Requesting a bounded Mermaid repair.', {'diagram_index':index+1})
-                    fixed = generate(context, {'instruction': 'A diagram failed validation. Repair Mermaid syntax using safe plain-text flowchart or sequenceDiagram syntax.', 'source': diagram.source})
-                    candidate = next((d for d in fixed.diagrams if d.kind == diagram.kind), None)
-                    if candidate:
-                        render_diagram(candidate.source)
-                        diagram.source = candidate.source
+                    candidate = DiagramsAgent().repair(diagram)
+                    render_diagram(candidate.source)
+                    diagram.source = candidate.source
                 except JobCancelled:
                     raise
                 except Exception:
@@ -156,7 +159,8 @@ def _process(job_id):
                 emit('context_built', 'Reference context assembled.', {'selected_passages':len(context['reference_passages']),'available_passages':sum(len(a.passages) for a in attachments),'history_versions':len(context['history'])})
                 version.context_sources = [{'id':r['id'], 'filename':r['filename'], 'reference':r['reference']} for r in context['reference_passages']]
                 stage(db, job, 'Generating Solution')
-                solution = generate(context)
+                solution = agents.SolutionAgent().run(context, before_estimates=lambda:stage(db, job, 'Estimating'), generate_fn=generate,
+                    before_resources=lambda:stage(db, job, 'Planning Resources'), before_methodology=lambda:stage(db, job, 'Defining Methodology'))
                 ensure_running(db, job)
                 validate_diagrams(db, job, context, solution)
                 ensure_running(db, job, lock=True)

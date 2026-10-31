@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     secure_cookies: bool = False
     public_url: str = 'http://localhost:5173'
     auth_mode: str = 'demo'
+    local_admin_username: str = 'admin'
+    local_admin_password: str = ''
+    local_auto_login: bool = False
     oidc_metadata_url: str = ''
     oidc_client_id: str = ''
     oidc_client_secret: str = ''
@@ -42,6 +45,10 @@ class Settings(BaseSettings):
     ocr_enabled: bool = False
 
     def validate_runtime(self):
+        if self.auth_mode not in ['demo', 'local', 'oidc']:
+            raise RuntimeError('AUTH_MODE must be demo, local or oidc.')
+        if self.auth_mode == 'local' and (not self.local_admin_username.strip() or not self.local_admin_password):
+            raise RuntimeError('Configure LOCAL_ADMIN_USERNAME and LOCAL_ADMIN_PASSWORD for local sign-in.')
         if self.environment == 'production':
             if (self.auth_mode != 'oidc' or self.llm_provider == 'demo' or not self.secure_cookies
                 or len(self.session_secret) < 32 or 'development' in self.session_secret

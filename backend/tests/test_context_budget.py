@@ -84,7 +84,7 @@ def test_diagram_repair_reduces_optional_references_without_changing_saved_conte
     monkeypatch.setattr(settings, 'llm_model', 'test-model')
     context = build_context('Design enterprise SSO', Preferences().model_dump(), [rfp_attachment()], [], [])
     original = json.dumps(context)
-    repair = {'instruction':'Repair Mermaid syntax', 'source':'flowchart LR\n' + ' A --> B\n' * 300}
+    repair = {'instruction':'Repair Mermaid syntax', 'source':'flowchart LR\n' + ' A --> B\n' * 500}
     assert providers.request_size(providers.SYSTEM, providers.solution_payload(context, repair)) > 24000
     def complete(system, text):
         assert providers.request_size(system, text) <= 24000

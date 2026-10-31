@@ -9,24 +9,29 @@ const solutionSteps:Step[] = [
  {name:'Request queue',description:'Schedules your request',statuses:['Queued']},
  {name:'Context builder',description:'References & decisions',statuses:['Building Context']},
  {name:'Solution architect',description:'Solution generation',statuses:['Generating Solution']},
+ {name:'Estimations Agent',description:'Effort, pricing & variations',statuses:['Estimating']},
+ {name:'Resources Agent',description:'Team & allocation',statuses:['Planning Resources']},
+ {name:'Methodology Agent',description:'Delivery & governance',statuses:['Defining Methodology']},
+ {name:'Diagrams Agent',description:'Architecture & delivery views',statuses:['Designing Diagrams']},
  {name:'Document builder',description:'Files & download package',statuses:['Creating Files']},
 ];
 const proposalSteps:Step[] = [
  {name:'Orchestrator',description:'Routes the request',statuses:['Queued','Building Context']},
  {name:'Requirements',description:'Validates scope & inputs',statuses:['Collecting Requirements']},
  {name:'Proposal creator',description:'Drafts the response',statuses:['Planning Proposal','Generating Solution']},
- {name:'Estimations',description:'Effort & commercials',statuses:['Estimating']},
+ {name:'Estimations Agent',description:'Effort & commercials',statuses:['Estimating']},
  {name:'Resources',description:'Team & allocation',statuses:['Planning Resources']},
  {name:'Methodology',description:'Delivery & governance',statuses:['Defining Methodology']},
+ {name:'Diagrams Agent',description:'Architecture & delivery views',statuses:['Designing Diagrams']},
  {name:'Documents',description:'Builds proposal files',statuses:['Preparing Documents','Creating Files']},
  {name:'Human review',description:'Review & approval',statuses:[]},
  {name:'Publish',description:'Response documents',statuses:[]},
 ];
-const documentSteps:Step[] = [solutionSteps[0],solutionSteps[3]];
+const documentSteps:Step[] = [{name:'File worker',description:'Starts the export worker',statuses:['Queued','Building Context']},solutionSteps[solutionSteps.length-1]];
 
-export function WorkflowProgress({job,artifacts=[],proposal}:{job:WorkflowJob;artifacts?:{status:string}[];proposal?:{status:string}}){
+export function WorkflowProgress({job,artifacts=[],proposal,outputs}:{job:WorkflowJob;outputs?:string[];artifacts?:{status:string}[];proposal?:{status:string}}){
  const isProposal=job.kind==='proposal';
- const steps=isProposal?proposalSteps:['files','artifact'].includes(job.kind||'')?documentSteps:solutionSteps;
+ const steps=isProposal?proposalSteps:['files','artifact'].includes(job.kind||'')?documentSteps:solutionSteps.filter(step=>{if(!outputs)return true;if(step.statuses.includes('Estimating'))return outputs.some(o=>['estimates','presentation'].includes(o));if(step.statuses.some(status=>['Planning Resources','Defining Methodology'].includes(status)))return outputs.some(o=>['plan','presentation'].includes(o));if(step.statuses.includes('Designing Diagrams'))return outputs.some(o=>['diagrams','estimates','presentation'].includes(o));return true;});
  const reportedStep=steps.findIndex(step=>step.statuses.includes(job.status));
  const [lastStep,setLastStep]=useState(reportedStep);
  const [detailsOpen,setDetailsOpen]=useState(true),[inspected,setInspected]=useState<number|null>(null);
@@ -38,8 +43,8 @@ export function WorkflowProgress({job,artifacts=[],proposal}:{job:WorkflowJob;ar
  const paused=waitingForInput||waitingForReview;
  const complete=job.status==='Completed'&&!paused;
  const processed=artifacts.filter(file=>['Completed','Failed'].includes(file.status)).length;
- const documentIndex=isProposal?6:steps.length-1;
- const current=waitingForInput?1:waitingForReview?7:complete?steps.length:reportedStep>=0?reportedStep:failed&&artifacts.length?documentIndex:lastStep;
+ const documentIndex=steps.findIndex(step=>step.statuses.includes('Creating Files'));
+ const current=waitingForInput?1:waitingForReview?steps.findIndex(step=>step.name==='Human review'):complete?steps.length:reportedStep>=0?reportedStep:failed&&artifacts.length?documentIndex:lastStep;
  let percent=current<0?null:Math.round(current/steps.length*100);
  if(job.status==='Creating Files'&&artifacts.length)percent=Math.min(99,Math.round((documentIndex+processed/artifacts.length)/steps.length*100));
  if(complete)percent=100;

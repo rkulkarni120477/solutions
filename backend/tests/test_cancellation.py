@@ -161,7 +161,8 @@ def test_worker_launch_failure_is_reported_instead_of_leaving_job_running(worksp
 
 def test_real_isolated_job_generates_files_in_the_test_database(workspace,monkeypatch):
     alice, _, sessions=workspace
-    _, job=queued(alice,{'outputs':['solution','presentation']})
+    # Keep this subprocess test independent of a live diagram-rendering service.
+    _, job=queued(alice,{'outputs':['solution']})
     from app.storage import storage
     monkeypatch.setenv('DATABASE_URL',str(sessions.kw['bind'].url).replace('\\','/'))
     monkeypatch.setenv('STORAGE_PATH',str(storage.root))

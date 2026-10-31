@@ -13,6 +13,7 @@ from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func, update
 from sqlalchemy.orm import Session as DBSession
+from sqlalchemy.exc import IntegrityError
 from .config import settings
 from .db import Base, engine, Session, get_db, User, Project, Version, Attachment, Job, Artifact, Audit, Proposal, AgentMessage, ResponseDocument, now, uid
 from .schemas import Generate, Solution, EstimateUpdate, ProposalCreate, ProposalAnswers, ProposalReview, OrchestratorRequest, calculate
@@ -138,7 +139,7 @@ def job_execution(job_id: str, user=Depends(current_user), db: DBSession = Depen
 
 @app.get('/api/config')
 def config():
-    return {'auth_mode': settings.auth_mode, 'provider': settings.llm_provider, 'demo': settings.llm_provider == 'demo', 'retention_days': settings.retention_days, 'upload_max_mb': settings.upload_max_mb}
+    return {'auth_mode': settings.auth_mode, 'auto_login': settings.auth_mode == 'local' and settings.local_auto_login and settings.environment != 'production', 'provider': settings.llm_provider, 'demo': settings.llm_provider == 'demo', 'retention_days': settings.retention_days, 'upload_max_mb': settings.upload_max_mb}
 
 
 def template_metadata(row):
@@ -202,6 +203,11 @@ def remove_template(template_id: str, user=Depends(current_user), db: DBSession 
 
 @app.post('/api/auth/demo')
 def demo_login(request: Request, db: DBSession = Depends(get_db)):
+    # Open tabs from before the local-admin upgrade use this endpoint.
+    # Honor the same explicitly enabled auto-login policy as the current client.
+    if settings.auth_mode == 'local' and settings.local_auto_login:
+        require_local_auth()
+        return local_session(request, db)
     if settings.auth_mode != 'demo':
         raise HTTPException(404)
     existing = db.get(User, request.session.get('user_id', ''))
@@ -212,6 +218,54 @@ def demo_login(request: Request, db: DBSession = Depends(get_db)):
     request.session.clear()
     request.session['user_id'] = existing.id
     return {'name': existing.name}
+
+
+class LocalLogin(BaseModel):
+    username: str = Field(min_length=1, max_length=200)
+    password: str = Field(min_length=1, max_length=1000, repr=False)
+
+
+def local_session(request, db):
+    subject = 'local:' + settings.local_admin_username
+    user = db.scalar(select(User).where(User.subject == subject))
+    if not user:
+        user = User(subject=subject, name=settings.local_admin_username)
+        db.add(user)
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            user = db.scalar(select(User).where(User.subject == subject))
+            if not user:
+                raise
+    request.session.clear()
+    request.session['user_id'] = user.id
+    return {'name': user.name}
+
+
+def require_local_auth():
+    if settings.auth_mode != 'local' or settings.environment == 'production':
+        raise HTTPException(404)
+    if not settings.local_admin_password:
+        raise HTTPException(503, 'Local sign-in is not configured.')
+
+
+@app.post('/api/auth/local')
+def local_login(body: LocalLogin, request: Request, db: DBSession = Depends(get_db)):
+    require_local_auth()
+    username_ok = secrets.compare_digest(body.username.encode(), settings.local_admin_username.encode())
+    password_ok = secrets.compare_digest(body.password.encode(), settings.local_admin_password.encode())
+    if not (username_ok and password_ok):
+        raise HTTPException(401, 'Invalid username or password.')
+    return local_session(request, db)
+
+
+@app.post('/api/auth/auto')
+def auto_login(request: Request, db: DBSession = Depends(get_db)):
+    require_local_auth()
+    if not settings.local_auto_login:
+        raise HTTPException(404)
+    return local_session(request, db)
 
 
 @app.get('/api/auth/login')
@@ -381,6 +435,10 @@ def update_estimates(project_id: str, version_id: str, body: EstimateUpdate, use
         raise HTTPException(404)
     solution = Solution.model_validate(version.response)
     solution = Solution.model_validate({**solution.model_dump(), **body.model_dump()})
+    from .diagrams import DELIVERY, delivery_views
+    if any(d.kind in DELIVERY for d in solution.diagrams):
+        delivery, solution.racii = delivery_views(solution)
+        solution.diagrams = [d for d in solution.diagrams if d.kind not in DELIVERY] + delivery
     job = new_version(db, project, 'Estimate revision: ' + version.prompt[:15000], version.preferences, solution.model_dump())
     copied = db.get(Version, job.version_id)
     copied.provider = version.provider
@@ -407,7 +465,7 @@ def refresh_files(project_id: str, version_id: str, user=Depends(current_user), 
 
 
 class DiagramUpdate(BaseModel):
-    index: int = Field(ge=0, le=4)
+    index: int = Field(ge=0, le=11)
     source: str = Field(min_length=5, max_length=20000)
 
 
@@ -640,4 +698,4 @@ if dist.exists():
     app.mount('/assets', StaticFiles(directory=dist / 'assets'), name='assets')
     @app.get('/')
     def index():
-        return FileResponse(dist / 'index.html')
+        return FileResponse(dist / 'index.html', headers={'Cache-Control': 'no-store'})

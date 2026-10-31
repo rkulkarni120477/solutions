@@ -11,6 +11,7 @@ import boto3
 from botocore.config import Config
 from .config import settings
 from .schemas import Solution
+from .solution_draft import SolutionDraft, SolutionOutline, DetailedSection, DeliverySeed
 from pydantic import ValidationError
 from .execution import emit
 
@@ -23,8 +24,15 @@ Distinguish supplied facts, assumptions, recommendations and requirements needin
 customer facts, references, benchmarks or verified prices. Citation IDs must exactly match provided passage IDs.
 Ask focused questions for essential missing information; otherwise label assumptions. Generate only requested
 deliverables. Effort is person-days; rates per person-day only if supplied. Never invent rates or cloud prices.
-Leave unrequested diagrams, estimates and phases empty. Mermaid must use strict-safe plain text labels,
-no directives, HTML, click, links, images or external resources. Support flowchart and sequenceDiagram.
+preferences.pricing supplies the requested commercial model, currency, role rates, budget cap and proposed scope variations.
+Preserve those inputs; do not reinterpret hourly rates as daily rates or invent hours per working day. The Estimations Agent calculates commercial estimates after solution drafting.
+This call produces ONLY the bounded solution draft schema. Describe architecture, components,
+security, data flows, risks and decisions in the narrative. Do not generate Mermaid diagrams,
+slide layouts, RACII matrices, resource tables, commercial calculations or methodology objects:
+Diagrams Agent, Estimations Agent and Documents Agent generate those in subsequent stages.
+When estimates or presentation is selected, supply up to 12 grouped draft effort rows; otherwise
+leave estimates empty. Leave unrequested phases empty. Maximum 8 focused narrative sections,
+about 150-250 words each; no appendix, duplicated scope, copied RFP passages or embedded JSON.
 Include security, resilience, alternatives, dependencies and risks as appropriate. Operating costs are separate.
 artifact_requests are advisory; the server will choose actual files based on user preferences.
 Return a complete response within output_token_budget. Prefer concise complete sections to unfinished detail.
@@ -47,7 +55,7 @@ REQUEST_OVERHEAD = 512  # Reserve the message envelope in addition to system and
 
 @lru_cache(maxsize=1)
 def solution_schema():
-    return Solution.model_json_schema()
+    return SolutionDraft.model_json_schema()
 
 
 def solution_payload(context, repair=None):
@@ -85,6 +93,65 @@ def validate_response(model, text):
     """Accept a JSON code fence without relaxing schema or JSON validation."""
     fenced = re.fullmatch(r'\s*```(?:json)?\s*\n(.*?)\n```\s*', text, re.DOTALL | re.IGNORECASE)
     return model.model_validate_json(fenced.group(1) if fenced else text)
+
+
+def validate_solution(text):
+    try:
+        return validate_response(SolutionDraft, text).solution()
+    except ValidationError:
+        # Preserve compatibility with complete responses from older adapters.
+        # Unknown/invalid fields still fail full Solution validation.
+        return validate_response(Solution, text)
+
+
+def checked_sources(solution, context):
+    allowed = {p['id'] for p in context['reference_passages']}
+    if any(source not in allowed for section in solution.sections for source in section.sources):
+        raise ValueError('The response cited a source that was not in the supplied context.')
+    return solution
+
+
+def selected_outputs(solution, context):
+    outputs = context['preferences']['outputs']
+    if 'presentation' in outputs:
+        outputs = [*outputs, 'diagrams', 'estimates']
+    if 'diagrams' not in outputs:
+        solution.diagrams = []
+    if 'estimates' not in outputs:
+        solution.estimates = []
+    if 'plan' not in outputs:
+        solution.phases = []
+    return solution
+
+
+def generate_parts(context):
+    """Recover truncation using complete independently validated model results."""
+    emit('solution_split_started', 'Output limit reached; generating the solution in smaller validated parts.')
+    outline = structured(SolutionOutline, SYSTEM + '\nReturn only a compact outline and planning metadata. section_topics contains titles and classifications, not section bodies. Cover the complete requested solution scope; every topic will be generated separately.',
+                         {'context':context})
+    sections = []
+    for index, topic in enumerate(outline.section_topics):
+        emit('solution_part_started', 'Generating a bounded solution section.', {'part_index':index+1,'part_count':len(outline.section_topics)})
+        def validate(section):
+            allowed = {p['id'] for p in context['reference_passages']}
+            if any(source not in allowed for source in section.sources):
+                raise ValueError('Use only the supplied source IDs.')
+            return section
+        section = structured(DetailedSection, SYSTEM + '\nGenerate ONLY the requested section, 300-650 words, maximum 5200 characters. Other sections and artifacts are generated separately. Do not write the whole proposal or any diagram code. Use only source IDs actually supporting this section.',
+                             {'context':context,'solution_title':outline.title,'topic':topic.model_dump()}, validate)
+        section.title = topic.title
+        sections.append(section)
+        emit('solution_part_completed', 'Solution section completed and validated.', {'part_index':index+1,'part_count':len(outline.section_topics)})
+    outputs = context['preferences']['outputs']
+    estimates, phases = [], []
+    if any(value in outputs for value in ['estimates','presentation','plan']):
+        seed = structured(DeliverySeed, SYSTEM + '\nReturn only compact effort and phase seeds for the completed solution. At most 12 grouped effort rows and 6 phases. Use at most 4 short activities per phase. No narrative sections, diagrams or commercial totals.',
+                          {'context':context,'solution_summary':outline.summary,'section_topics':[t.title for t in outline.section_topics]})
+        estimates, phases = seed.estimates, seed.phases
+    result = Solution.model_validate({**outline.model_dump(exclude={'section_topics'}),'sections':[section.model_dump() for section in sections],
+                                     'diagrams':[],'estimates':estimates,'phases':phases,'artifact_requests':[]})
+    emit('solution_split_completed', 'All solution parts assembled and validated.', {'part_count':len(sections)})
+    return selected_outputs(checked_sources(result, context), context)
 
 
 _SCALE_UNITS = {'k': 1_000, 'thousand': 1_000, 'm': 1_000_000, 'million': 1_000_000}
@@ -197,6 +264,8 @@ def demo(context):
     cited = [r['id'] for r in refs[:4]]
     excerpt = '\n\n'.join(f"**{r['filename']} — {r['reference']}**\n\n{r['text'][:600]}" for r in refs[:4])
     outputs = pref.get('outputs', [])
+    if 'presentation' in outputs:
+        outputs = list(dict.fromkeys([*outputs, 'diagrams', 'estimates']))
     profile = _demo_profile(context, outputs, cloud)
     return Solution.model_validate({
         'title': ' '.join(prompt.split())[:85],
@@ -380,21 +449,10 @@ def generate(context, repair=None):
             if request_size(SYSTEM, payload_text) > settings.max_input_tokens:
                 raise ProviderError('The request exceeds the configured input budget. Shorten the prompt or increase MAX_INPUT_TOKENS within your model limits.')
             text = _complete(SYSTEM, payload_text)
-            solution = validate_response(Solution, text)
-            allowed = {p['id'] for p in context['reference_passages']}
-            if any(source not in allowed for section in solution.sections for source in section.sources):
-                raise ValueError('The response cited a source that was not in the supplied context.')
-            outputs = context['preferences']['outputs']
-            if 'diagrams' not in outputs:
-                solution.diagrams = []
-            if 'estimates' not in outputs:
-                solution.estimates = []
-            if 'plan' not in outputs:
-                solution.phases = []
-            return solution
+            solution = validate_solution(text)
+            return selected_outputs(checked_sources(solution, context), context)
         except OutputLimitError as exc:
-            last = 'Provider output exceeded its token limit, including the shorter retry. Request a more concise response or increase MAX_OUTPUT_TOKENS within your model limits.'
-            payload_text = solution_payload(context, retry_instruction(exc))
+            return generate_parts(context)
         except ProviderError:
             raise
         except httpx.HTTPStatusError as exc:

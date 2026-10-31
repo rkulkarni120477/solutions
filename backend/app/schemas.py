@@ -7,7 +7,38 @@ class Strict(BaseModel):
     model_config = ConfigDict(extra='forbid', allow_inf_nan=False)
 
 
+CommercialModel = Literal['effort_only', 'fixed_price', 'time_and_materials', 'capped_time_and_materials', 'milestone', 'retainer', 'hybrid', 'other']
+
+
+class RoleRate(Strict):
+    role: str = Field(min_length=1, max_length=150)
+    rate: float | None = Field(default=None, ge=0, le=1000000)
+
+
+class EstimateVariation(Strict):
+    name: str = Field(min_length=1, max_length=200)
+    role: str = Field(min_length=1, max_length=150)
+    effort_days: float = Field(ge=-100000, le=100000)
+    rate: float | None = Field(default=None, ge=0, le=1000000)
+
+
+class PricingInputs(Strict):
+    model: Literal['auto', 'effort_only', 'fixed_price', 'time_and_materials', 'capped_time_and_materials', 'milestone', 'retainer', 'hybrid', 'other'] = 'auto'
+    currency: str | None = Field(default=None, pattern='^[A-Z]{3}$')
+    role_rates: list[RoleRate] = Field(default_factory=list, max_length=40)
+    budget_cap: float | None = Field(default=None, ge=0, le=1000000000000)
+    variations: list[EstimateVariation] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode='after')
+    def unique_roles(self):
+        roles = [row.role.strip().casefold() for row in self.role_rates]
+        if len(roles) != len(set(roles)):
+            raise ValueError('Supply one daily rate per role.')
+        return self
+
+
 class Preferences(Strict):
+    pricing: PricingInputs = Field(default_factory=PricingInputs)
     word_template_id: str | None = Field(default=None, max_length=36)
     powerpoint_template_id: str | None = Field(default=None, max_length=36)
     cloud: Literal['AWS', 'Azure', 'GCP', 'Hybrid', 'On-premises', 'No preference'] = 'No preference'
@@ -34,8 +65,18 @@ class Section(Strict):
 
 class Diagram(Strict):
     title: str = Field(max_length=150)
-    kind: Literal['conceptual', 'logical', 'deployment', 'integration', 'workflow', 'sequence']
+    kind: Literal['network', 'conceptual', 'technical', 'logical', 'deployment', 'integration', 'workflow', 'sequence', 'resource_management', 'racii', 'estimations', 'development_plan', 'methodology']
     source: str = Field(max_length=20000)
+    description: str = Field(default='', max_length=6000)
+
+
+class ResponsibilityRow(Strict):
+    activity: str = Field(min_length=1, max_length=200)
+    responsible: str = Field(min_length=1, max_length=150)
+    accountable: str = Field(min_length=1, max_length=150)
+    consulted: str = Field(default='', max_length=150)
+    informed: str = Field(default='', max_length=150)
+    involved: str = Field(default='', max_length=150)
 
 
 class Estimate(Strict):
@@ -79,12 +120,15 @@ class Methodology(Strict):
 
 
 class Solution(Strict):
+    commercial_model: CommercialModel = 'effort_only'
+    commercial_basis: str = Field(default='', max_length=2000)
+    pricing: PricingInputs = Field(default_factory=PricingInputs)
     title: str = Field(max_length=150)
     summary: str = Field(max_length=8000)
     sections: list[Section] = Field(max_length=30)
     assumptions: list[str] = Field(max_length=30)
     questions: list[str] = Field(max_length=15)
-    diagrams: list[Diagram] = Field(max_length=5)
+    diagrams: list[Diagram] = Field(max_length=12)
     estimates: list[Estimate] = Field(max_length=100)
     effort_unit: Literal['person-days'] = 'person-days'
     currency: str = Field(default='USD', pattern='^[A-Z]{3}$')
@@ -98,6 +142,7 @@ class Solution(Strict):
     # Populated by the presales Resources and DeliveryMethodology agents.
     resources: list[ResourceRole] = Field(default_factory=list, max_length=40)
     methodology: Methodology | None = None
+    racii: list[ResponsibilityRow] = Field(default_factory=list, max_length=20)
 
 
 ProposalFormat = Literal['docx', 'pptx']
@@ -171,6 +216,8 @@ class ProposalPlan(Strict):
 
 
 class EstimationResult(Strict):
+    commercial_model: CommercialModel = 'effort_only'
+    commercial_basis: str = Field(default='', max_length=2000)
     estimates: list[Estimate] = Field(min_length=1, max_length=100)
     contingency_percent: float = Field(ge=0, le=100)
     notes: str = Field(default='', max_length=2000)
@@ -200,10 +247,13 @@ def calculate(solution: Solution):
     sums = {key: sum(Decimal(str(getattr(row, key))) for row in solution.estimates) for key in ['low', 'expected', 'high']}
     multiplier = 1 + Decimal(str(solution.contingency_percent)) / 100
     rated = bool(solution.estimates) and all(row.rate is not None for row in solution.estimates)
-    return {
+    result = {
         'effort': {k: money(v) for k, v in sums.items()},
         'with_contingency': {k: money(v * multiplier) for k, v in sums.items()},
         'implementation_cost': {k: money(sum(Decimal(str(getattr(r, k))) * Decimal(str(r.rate)) for r in solution.estimates) * multiplier) for k in sums} if rated else None,
         'capacity_floor_weeks': money(sums['expected'] * multiplier / Decimal(str(solution.staffing_fte)) / 5),
         'duration_basis': 'Capacity lower bound at 5 working days/week; dependencies, specialist capacity and approvals may extend elapsed delivery.',
     }
+    from .estimation_math import commercial_totals
+    result['commercial'] = commercial_totals(solution, result)
+    return result

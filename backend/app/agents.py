@@ -8,14 +8,16 @@ instead of substituting deterministic demo output.
 import json
 import math
 import re
+from types import SimpleNamespace
 from .config import settings
 from .context import build_context
 from .db import AgentMessage, Attachment, Version, Artifact, now
 from .providers import generate, structured, ProviderError
 from .job_control import ensure_running
-from .execution import emit, record_stage
+from .execution import emit, record_stage, component
 from .schemas import (Diagram, EstimationResult, Estimate, Methodology, MethodologyPlan, MissingInformation, Phase,
                       ProposalPlan, RequirementItem, RequirementsAssessment, ResourcePlan, ResourceRole, Section, Solution)
+from .schemas import PricingInputs, calculate
 
 STAGES = ['Collecting Requirements', 'Planning Proposal', 'Estimating', 'Planning Resources', 'Defining Methodology', 'Preparing Documents']
 OUTPUTS = ['solution', 'diagrams', 'estimates', 'plan', 'presentation']
@@ -53,6 +55,13 @@ class AgentBus:
         self.db.add(AgentMessage(proposal_id=self.proposal.id, agent=agent, recipient=recipient, kind=kind, content=content[:4000]))
         if self.commit:
             self.db.commit()
+
+
+class ExecutionBus:
+    """Operational hand-offs for solution jobs; exclude prompt and response content."""
+    def send(self, sender, recipient, kind, content):
+        emit('agent_handoff', f'{sender} sent {kind} to {recipient or "workflow"}.',
+             {'caller':sender,'callee':recipient or 'workflow','message_kind':kind})
 
 
 def live():
@@ -93,7 +102,8 @@ class RequirementsCollectorAgent:
     def heuristic(self, proposal, attachments):
         prefs = proposal.preferences or {}
         answers = {k: v for k, v in (proposal.answers or {}).items() if v.strip()}
-        corpus = ' '.join([proposal.request, json.dumps(prefs), *answers.values(), *(p['text'] for a in attachments for p in a.passages)]).lower()
+        corpus = ' '.join([proposal.request, json.dumps({k:v for k,v in prefs.items() if k != 'pricing'}), *answers.values(), *(p['text'] for a in attachments for p in a.passages)]).lower()
+        pricing = PricingInputs.model_validate(prefs.get('pricing', {}))
         requirements, missing = [], []
         sources = [('Request', proposal.request)] + [(f"{a.filename} {p.get('reference', '')}".strip(), p['text']) for a in attachments for p in a.passages]
         for source, text in sources:
@@ -104,7 +114,8 @@ class RequirementsCollectorAgent:
                 if len(requirements) >= 25:
                     break
         for key, category, question, reason, words, required in CHECKLIST:
-            covered = key in answers or any(w in corpus for w in words) or (key == 'technology' and prefs.get('cloud', 'No preference') != 'No preference')
+            commercial_supplied = key == 'commercial' and (pricing.model not in ['auto','effort_only'] or pricing.budget_cap is not None or bool(pricing.role_rates))
+            covered = key in answers or any(w in corpus for w in words) or commercial_supplied or (key == 'technology' and prefs.get('cloud', 'No preference') != 'No preference')
             if key in answers:
                 requirements.append(RequirementItem(id=f'A-{key}', category=category, statement=answers[key], status='answered', source='User clarification'))
             elif not covered:
@@ -122,7 +133,7 @@ class RequirementsCollectorAgent:
                    'required_topics': [{'id': c[0], 'topic': c[1], 'required': c[5]} for c in CHECKLIST]}
         result = consult(self.bus, self.name, RequirementsAssessment,
                          'Extract the concrete requirements, then list ONLY essential information that is genuinely missing before a proposal can start. '
-                         'Use the required_topics ids as missing ids where applicable. Treat answered ids as covered. ready is true only when no required item is missing.',
+                         'Use the required_topics ids as missing ids where applicable. Treat answered ids as covered. Empty/default pricing fields do not establish commercial requirements. ready is true only when no required item is missing.',
                          payload, lambda: self.heuristic(proposal, attachments))
         answered = {k for k, v in (proposal.answers or {}).items() if v.strip()}
         result.missing = [m for m in result.missing if m.id not in answered]
@@ -140,8 +151,8 @@ class RequirementsCollectorAgent:
 class EstimationsAgent:
     name = 'EstimationsAgent'
 
-    def __init__(self, bus):
-        self.bus = bus
+    def __init__(self, bus=None):
+        self.bus = bus or ExecutionBus()
 
     def heuristic(self, solution, assessment):
         estimates = list(solution.estimates) or [Estimate(activity=a, role=r, low=l, expected=e, high=h, dependency=d) for a, r, l, e, h, d in [
@@ -157,16 +168,98 @@ class EstimationsAgent:
         note = f'Contingency set to {contingency:g}% ({assumed} unvalidated assumption(s) add risk).' if assumed else f'Contingency kept at {contingency:g}%.'
         return EstimationResult(estimates=estimates, contingency_percent=contingency, notes=note)
 
-    def run(self, solution, assessment, requester):
+    def run(self, solution, assessment, requester, context=None):
         self.bus.send(requester, self.name, 'task', 'Estimate effort (person-days, low/expected/high) for the proposed scope.')
+        inputs = solution.pricing.model_copy(deep=True)
+        selected = PricingInputs.model_validate((context or {}).get('preferences', {}).get('pricing', {}))
+        for field in ['currency','budget_cap']:
+            if getattr(selected, field) is not None:
+                setattr(inputs, field, getattr(selected, field))
+        if selected.model != 'auto':
+            inputs.model = selected.model
+        if selected.role_rates:
+            inputs.role_rates = selected.role_rates
+        if selected.variations:
+            inputs.variations = selected.variations
+        raw = ' '.join([str((context or {}).get('current_prompt','')), str((context or {}).get('preferences',{}).get('constraints','')), assessment.summary, solution.summary]).lower()
+        inferred = ('capped_time_and_materials' if re.search(r'capped|not.to.exceed',raw) and re.search(r't&m|time\s*(?:and|&)\s*materials',raw) else
+                    'fixed_price' if re.search(r'fixed[ -]price|fixed[ -]fee|lump[ -]sum',raw) else
+                    'time_and_materials' if re.search(r't&m|time\s*(?:and|&)\s*materials',raw) else
+                    'retainer' if 'retainer' in raw else 'milestone' if 'milestone based' in raw else 'effort_only')
+        result_model = inputs.model if inputs.model != 'auto' else inferred if inferred != 'effort_only' else solution.commercial_model
+        manual_rates = {r.role.strip().casefold():r.rate for r in inputs.role_rates}
+        allowed_rates = {}
+        for role in {e.role.strip().casefold() for e in solution.estimates}:
+            rates = {e.rate for e in solution.estimates if e.role.strip().casefold() == role}
+            if len(rates) == 1:
+                allowed_rates[role] = next(iter(rates))
+        activity_rates = {e.activity.strip().casefold():e.rate for e in solution.estimates if e.rate is not None}
+        def validate(result):
+            # Prices are calculated in code. Model-suggested rates cannot become
+            # prices unless the request already supplied the matching rate.
+            for row in result.estimates:
+                row.rate = manual_rates.get(row.role.strip().casefold(), activity_rates.get(row.activity.strip().casefold(), allowed_rates.get(row.role.strip().casefold())))
+            return result
         result = consult(self.bus, self.name, EstimationResult,
-                         'Produce a three-point effort estimate in person-days per activity and role, with dependencies, confidence and contingency. Never invent rates.',
+                         'Produce a three-point effort estimate in person-days per activity and role, with dependencies, confidence and contingency. '
+                         'Select the appropriate commercial_model from the supplied scope and requested model: fixed price, T&M, capped T&M, milestone, retainer, hybrid, other, or effort only when commercial terms are absent. '
+                         'Explain scope baseline, uncertainty, exclusions and billing assumptions in commercial_basis. Never invent rates, prices, margin, tax or contractual approval. Do not calculate totals; the backend does that.',
                          {'solution_summary': solution.summary[:4000], 'sections': [s.title for s in solution.sections], 'draft_estimates': [e.model_dump() for e in solution.estimates],
-                          'requirements': [r.statement for r in assessment.requirements][:40]}, lambda: self.heuristic(solution, assessment))
+                          'scope_detail':[s.content[:900] for s in solution.sections[:3]],'assumptions':solution.assumptions[:10],
+                          'request':str((context or {}).get('current_prompt',''))[:2000], 'pricing':inputs.model_dump(),
+                          'requirements': [r.statement for r in assessment.requirements][:20]}, lambda: self.heuristic(solution, assessment), validate)
+        result = validate(result)
+        if inputs.model != 'auto' or result.commercial_model == 'effort_only':
+            result.commercial_model = result_model
         solution.estimates, solution.contingency_percent = result.estimates[:100], result.contingency_percent
+        solution.commercial_model = result.commercial_model
+        solution.commercial_basis = result.commercial_basis or 'Indicative scope and effort baseline. Confirm rates, dependencies and commercial terms before approval.'
+        solution.pricing = inputs
+        if inputs.currency:
+            solution.currency = inputs.currency
         total = sum(e.expected for e in solution.estimates)
         self.bus.send(self.name, requester, 'result', f'{len(solution.estimates)} activities, {total:g} expected person-days, {result.contingency_percent:g}% contingency. {result.notes}'.strip())
-        return result
+        self.bus.send(self.name, 'Diagrams Agent', 'task', 'Derive the Estimations Summary diagram from calculated effort, commercial model, supplied rates and variations.')
+        from .diagrams import DiagramsAgent
+        with component('DiagramsAgent', 'app.diagrams.DiagramsAgent.estimation_summary'):
+            diagram = DiagramsAgent().estimation_summary(solution)
+        solution.diagrams = [d for d in solution.diagrams if d.kind != 'estimations'] + [diagram]
+        self.bus.send('Diagrams Agent', self.name, 'result', 'Estimations Summary diagram returned for the estimation slide.')
+        emit('estimation_calculated', 'Estimates calculated and returned to the Solution Agent.',
+             {'commercial_model':solution.commercial_model,'estimate_rows':len(solution.estimates),
+              'priced':calculate(solution)['commercial']['base_cost'] is not None})
+        self.bus.send(self.name, requester, 'result', 'Calculated effort, commercial totals and the Estimations Summary diagram returned for solution assembly.')
+        return {'plan':result,'totals':calculate(solution),'summary_diagram':diagram}
+
+
+class SolutionAgent:
+    name = 'SolutionAgent'
+
+    def __init__(self, bus=None):
+        self.bus = bus or ExecutionBus()
+
+    def run(self, context, assessment=None, before_estimates=None, generate_fn=None, before_resources=None, before_methodology=None):
+        with component('SolutionAgent', 'app.agents.SolutionAgent.run'):
+            solution = (generate_fn or generate)(context)
+        outputs = context.get('preferences',{}).get('outputs',[])
+        if any(output in outputs for output in ['estimates','presentation']):
+            if before_estimates:
+                before_estimates()
+            assessment = assessment or RequirementsAssessment(summary=solution.summary,requirements=[],missing=[],ready=True)
+            package = EstimationsAgent(self.bus).run(solution, assessment, self.name, context)
+            emit('estimation_received', 'Solution Agent received estimates, calculated commercial totals and the summary diagram.',
+                 {'commercial_model':package['totals']['commercial']['model'],'estimate_rows':len(package['plan'].estimates)})
+        if any(output in outputs for output in ['presentation','plan']):
+            # ProposalCreator already coordinates these specialists for RFPs.
+            # Normal solution jobs supply callbacks and use the same agents.
+            if before_resources:
+                before_resources()
+                ResourcesAgent(self.bus).run(solution, self.name)
+            if before_methodology:
+                before_methodology()
+                proposal = SimpleNamespace(request=context['current_prompt'],preferences=context['preferences'],answers={})
+                DeliveryMethodologyAgent(self.bus).run(proposal, solution, self.name)
+        return solution
 
 
 def duration_weeks(solution):
@@ -272,7 +365,7 @@ class DocumentsAgent:
         if solution.phases and len(solution.diagrams) < 5 and not any(d.kind == 'workflow' for d in solution.diagrams):
             nodes = [f'P{i}["{label(p.name)}"]' for i, p in enumerate(solution.phases[:8])]
             solution.diagrams.append(Diagram(title='Delivery roadmap', kind='workflow', source='flowchart LR\n  ' + ' --> '.join(nodes)))
-        self.bus.send(self.name, 'ProposalCreator', 'result', f'Response content assembled: {len(solution.sections)} sections, {len(solution.diagrams)} diagram(s), {len(solution.estimates)} estimate lines, {len(solution.resources)} team roles.')
+        self.bus.send(self.name, 'ProposalCreator', 'result', f'Response content assembled: {len(solution.sections)} sections, {len(solution.diagrams)} diagram(s), {len(solution.estimates)} estimate lines, {len(solution.resources)} team roles. PowerPoint uses project headers, review footers, embedded architecture, editable estimate tables and delivery sections.')
         return plan.formats
 
 
@@ -338,14 +431,14 @@ class ProposalCreatorAgent:
         emit('context_built', 'Reference context assembled.', {'selected_passages':len(context['reference_passages']),'available_passages':sum(len(a.passages) for a in attachments),'history_versions':len(context['history'])})
         stage(db, job, 'Generating Solution')
         self.bus.send(self.name, None, 'info', 'Drafting the solution narrative, architecture and diagrams.')
-        solution = generate(context)
-        validate_diagrams(db, job, context, solution)
-        stage(db, job, 'Estimating')
-        estimations.run(solution, assessment, self.name)
+        solution = SolutionAgent(self.bus).run(context, assessment, before_estimates=lambda:stage(db, job, 'Estimating'))
         stage(db, job, 'Planning Resources')
         resources.run(solution, self.name)
         stage(db, job, 'Defining Methodology')
         formats = documents.run(proposal, solution, assessment, plan, estimations, resources, methodology)
+        self.bus.send(self.name, 'Diagrams Agent', 'task', 'Design network, conceptual, technical and logical views, an applicable workflow, and delivery diagrams with descriptions.')
+        validate_diagrams(db, job, context, solution)
+        self.bus.send('Diagrams Agent', 'DocumentsAgent', 'result', f'{len(solution.diagrams)} architecture and delivery views prepared with explanations and a proposed RACII matrix.')
         stage(db, job, 'Preparing Documents')
         solution = Solution.model_validate(solution.model_dump())
         number = (db.query(Version.number).filter_by(project_id=project.id).order_by(Version.number.desc()).first() or [0])[0] + 1

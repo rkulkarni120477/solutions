@@ -21,6 +21,8 @@ from .storage import storage
 from .presentation import create_presentation
 from .templates import template_for_version, prepare_template
 from .job_control import ensure_running
+from .execution import emit
+from .diagrams import DELIVERY
 
 
 MIMES = {'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'pdf': 'application/pdf', 'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation', 'zip': 'application/zip', 'svg': 'image/svg+xml', 'png': 'image/png', 'jpg': 'image/jpeg', 'mmd': 'text/plain'}
@@ -87,7 +89,9 @@ def text_blocks(s):
     if s.resources:
         yield 'Team and resources', '\n'.join(f'{r.role}: {r.count:g} ({r.allocation}) — {r.responsibilities}' for r in s.resources)
     yield 'Estimate basis', f'Unit: {s.effort_unit}. Currency: {s.currency}. Contingency: {s.contingency_percent}%. Staffing: {s.staffing_fte} FTE.\n{s.duration_note}\nOperating cost: {s.operating_cost_note}\nExclusions: ' + '; '.join(s.exclusions)
-    yield 'Calculated estimate totals', json.dumps(calculate(s), indent=2)
+    commercial = calculate(s)['commercial']
+    yield 'Commercial estimation basis', commercial['label'] + '\n' + commercial['basis'] + '\n' + commercial['note'] + '\n' + '\n'.join(commercial['missing_inputs'])
+    yield 'Calculated estimate totals', json.dumps({k:v for k,v in calculate(s).items() if k != 'commercial'}, indent=2)
 
 
 def create_document(kind, solution, provider, diagrams=None, metadata=None, template=None):
@@ -120,6 +124,9 @@ def create_document(kind, solution, provider, diagrams=None, metadata=None, temp
         for title, png in diagrams or []:
             doc.add_heading(title, 1)
             doc.add_picture(io.BytesIO(png), width=Inches(6))
+            description = next((d.description for d in s.diagrams if d.title == title), '')
+            if description:
+                doc.add_paragraph(description)
         if s.estimates:
             table = doc.add_table(rows=1, cols=5)
             if 'Light Shading Accent 1' in doc.styles:
@@ -159,6 +166,9 @@ def create_document(kind, solution, provider, diagrams=None, metadata=None, temp
             w = 470
             h = min(500, w * img.height / img.width)
             story += [Paragraph(escape(title), styles['Heading2']), PDFImage(io.BytesIO(png), width=w, height=h, kind='proportional')]
+            description = next((d.description for d in s.diagrams if d.title == title), '')
+            if description:
+                story.append(Paragraph(escape(description), styles['BodyText']))
         SimpleDocTemplate(buffer, pagesize=A4, title=s.title, author='Solution Architect Workspace').build(story)
     elif kind == 'xlsx':
         wb = Workbook()
@@ -197,6 +207,22 @@ def create_document(kind, solution, provider, diagrams=None, metadata=None, temp
         for row in basis:
             row[1].alignment = Alignment(wrap_text=True, vertical='top')
             basis.row_dimensions[row[0].row].height = 60
+        commercial = calculate(s)['commercial']
+        pricing = wb.create_sheet('Commercial estimate')
+        for label, value in [('Model',commercial['label']),('Currency',s.currency),('Basis',commercial['basis']),
+                             ('Expected base cost before contingency',commercial['base_cost']['expected'] if commercial['base_cost'] else 'Rates required'),
+                             ('Indicative fixed price',commercial['indicative_fixed_price']),('Proposed variation cost',commercial['variation_cost']),
+                             ('Projected cost with variations',commercial['expected_with_variations']),('Budget cap',commercial['budget_cap']),
+                             ('Missing inputs','; '.join(commercial['missing_inputs'])),('Terms',commercial['note'])]:
+            pricing.append([label,safe(value)])
+        pricing.append(['Proposed variation','Role','Person-days','Rate / day','Amount'])
+        for v in commercial['variations']:
+            pricing.append([safe(v['name']),safe(v['role']),v['effort_days'],v['rate'],v['amount']])
+        pricing.column_dimensions['A'].width = 48
+        pricing.column_dimensions['B'].width = 65
+        for col in ['C','D','E']: pricing.column_dimensions[col].width = 20
+        for row in pricing:
+            for cell in row: cell.alignment = Alignment(wrap_text=True,vertical='top')
         wb.save(buffer)
     else:
         raise ValueError('Unknown artifact format')
@@ -231,6 +257,17 @@ def build_artifact(db, artifact, version, cache):
         if a.status == 'Completed' and a.kind.endswith(':png') and a.key:
             idx = int(a.kind.split(':')[1])
             diagrams.append((s.diagrams[idx].title, storage.get(a.key)))
+    if artifact.kind == 'pptx':
+        # Rendering a PPT-only retry must not depend on a previous sibling PNG
+        # being present. Use the same controlled renderer as the diagram agent.
+        for diagram in s.diagrams:
+            if not any(title == diagram.title for title, _ in diagrams):
+                if diagram.source not in cache:
+                    cache[diagram.source] = render_diagram(diagram.source)
+                diagrams.append((diagram.title, cache[diagram.source]['png']))
+        emit('presentation_assembled', 'Assembling styled slides with architecture diagrams and estimation tables.',
+             {'architecture_diagrams': sum(d.kind not in DELIVERY for d in s.diagrams),
+              'delivery_diagrams': sum(d.kind in DELIVERY for d in s.diagrams), 'estimate_rows': len(s.estimates)})
     meta = {'project_id': version.project_id, 'version': version.number, 'created_at': version.created_at.isoformat()}
     if db.query(Proposal.id).filter(Proposal.draft_version_id == version.id).first():
         meta['proposal'] = True

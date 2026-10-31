@@ -126,7 +126,7 @@ def test_dark_template_background_remains_inherited_with_readable_text():
     source.save(data)
     prs = Presentation(io.BytesIO(create_document('pptx', sample_solution(), 'demo', template=data.getvalue())))
     assert not prs.slides[0]._element.xpath('./p:cSld/p:bg')
-    title = prs.slides[1].shapes[0].text_frame.paragraphs[0]
+    title = next(shape for shape in prs.slides[1].shapes if shape.name == 'Slide title').text_frame.paragraphs[0]
     assert str(title.font.color.rgb) == 'FFFFFF'
 
 

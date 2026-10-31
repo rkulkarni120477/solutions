@@ -9,6 +9,10 @@ from app import worker
 from app.artifacts import create_document
 from app.providers import demo
 from app.schemas import Preferences, calculate
+from app import artifacts, providers
+from app.db import Artifact, Version
+from app.config import settings
+from test_workspace import fake_render
 
 
 def solution():
@@ -84,12 +88,14 @@ def test_presentation_pagination_preserves_long_text_and_table_rows():
 
 def test_package_automatically_includes_pptx_and_refresh_preserves_version(workspace, monkeypatch):
     alice, bob, _ = workspace
+    monkeypatch.setattr(worker, 'render_diagram', fake_render)
+    monkeypatch.setattr(artifacts, 'render_diagram', fake_render)
     pid = alice.post('/api/projects', json={'title': 'Briefing package'}).json()['id']
     # Explicitly omit presentation, diagrams and solution-document flags.
     alice.post(f'/api/projects/{pid}/generate', json={'prompt': 'Estimate a secure customer portal', 'preferences': {'outputs': ['estimates']}})
     worker.run_once()
     original = alice.get(f'/api/projects/{pid}').json()['versions'][0]
-    assert {a['kind'] for a in original['artifacts']} == {'pptx', 'xlsx', 'zip'}
+    assert {a['kind'] for a in original['artifacts']} == {'pptx', 'xlsx', 'zip',*[f'diagram:0:{ext}' for ext in ['mmd','svg','png','jpg']]}
     package = next(a for a in original['artifacts'] if a['kind'] == 'zip')
     link = alice.post(f'/api/artifacts/{package["id"]}/download-link').json()['url']
     with zipfile.ZipFile(io.BytesIO(alice.get(link).content)) as archive:
@@ -108,3 +114,55 @@ def test_package_automatically_includes_pptx_and_refresh_preserves_version(works
     assert versions[1]['response'] == original['response']
     assert versions[1]['provider'] == original['provider']
     assert all(a['status'] == 'Completed' for a in versions[1]['artifacts'])
+
+
+def test_presentation_only_includes_architecture_and_estimate_inputs():
+    s = demo({'preferences': Preferences(outputs=['presentation']).model_dump(),
+              'current_prompt': 'Design a secure knowledge portal', 'reference_passages': [],
+              'approved_decisions': [], 'history': []})
+    assert any(d.kind == 'logical' for d in s.diagrams) and s.estimates
+    diagrams = [(d.title, fake_render(d.source)['png']) for d in s.diagrams]
+    prs = Presentation(io.BytesIO(create_document('pptx', s, 'demo', diagrams, {'version': 3})))
+    for slide in prs.slides:
+        assert any(shape.name == 'Project header' and shape.text == s.title for shape in slide.shapes)
+        assert any(shape.name == 'Review footer' and 'v3 |' in shape.text for shape in slide.shapes)
+    assert any(shape.shape_type == MSO_SHAPE_TYPE.PICTURE for slide in prs.slides for shape in slide.shapes)
+    assert 'Effort by workstream' in visible_text(prs)
+    assert next(i for i,slide in enumerate(prs.slides) if any(shape.shape_type == MSO_SHAPE_TYPE.PICTURE for shape in slide.shapes)) < 4
+
+
+def test_ppt_retry_renders_architecture_without_sibling_png(workspace, monkeypatch):
+    alice, _, sessions = workspace
+    pid = alice.post('/api/projects', json={'title': 'PPT retry diagram'}).json()['id']
+    s = solution()
+    calls = []
+    def render(source):
+        calls.append(source)
+        return fake_render(source)
+    monkeypatch.setattr(artifacts, 'render_diagram', render)
+    with sessions() as db:
+        version = Version(project_id=pid, number=1, prompt='PPT retry', preferences={}, response=s.model_dump(), provider='demo')
+        db.add(version)
+        db.flush()
+        artifact = Artifact(project_id=pid, version_id=version.id, kind='pptx', filename='retry.pptx')
+        db.add(artifact)
+        db.flush()
+        data = artifacts.build_artifact(db, artifact, version, {})
+    prs = Presentation(io.BytesIO(data))
+    assert calls == [d.source for d in s.diagrams]
+    assert any(shape.shape_type == MSO_SHAPE_TYPE.PICTURE for slide in prs.slides for shape in slide.shapes)
+
+
+def test_initial_solution_defers_technical_artifacts_to_specialist_agents(monkeypatch):
+    monkeypatch.setattr(settings, 'llm_provider', 'bedrock')
+    monkeypatch.setattr(settings, 'llm_model', 'test')
+    monkeypatch.setattr(providers.time, 'sleep', lambda _: None)
+    context = {'preferences': Preferences(outputs=['presentation']).model_dump(), 'current_prompt': 'Design a portal',
+               'reference_passages': [], 'history': [], 'approved_decisions': []}
+    s = solution()
+    missing = s.model_copy(deep=True)
+    missing.diagrams, missing.estimates = [], []
+    results = iter([missing.model_dump_json(), s.model_dump_json()])
+    monkeypatch.setattr(providers, '_complete', lambda *args: next(results))
+    result = providers.generate(context)
+    assert result.diagrams == [] and result.estimates == []

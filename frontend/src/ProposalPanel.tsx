@@ -1,3 +1,5 @@
+import {PricingOptions,pricingDefaults} from './PricingOptions';
+import type {PricingInputs} from './PricingOptions';
 import { useState } from 'react';
 import { ArrowDownToLine, Bot, CheckCircle2, CircleHelp, ClipboardCheck, FileText, LoaderCircle, RefreshCw, Send, ShieldCheck, Upload, Workflow } from 'lucide-react';
 import './proposal.css';
@@ -19,17 +21,19 @@ const PIPELINE = [
  {agent:'EstimationsAgent', label:'Estimations'},
  {agent:'ResourcesAgent', label:'Resources'},
  {agent:'DeliveryMethodology', label:'Methodology'},
+ {agent:'Diagrams Agent', label:'Diagrams Agent'},
  {agent:'DocumentsAgent', label:'Documents'},
  {agent:'Reviewer', label:'Human review'},
 ];
-const STAGE_AGENT:Record<string,string> = {'Queued':'Orchestrator','Building Context':'Orchestrator','Collecting Requirements':'RequirementsCollector','Planning Proposal':'ProposalCreator','Generating Solution':'ProposalCreator','Estimating':'EstimationsAgent','Planning Resources':'ResourcesAgent','Defining Methodology':'DeliveryMethodology','Preparing Documents':'DocumentsAgent','Creating Files':'DocumentsAgent'};
-export const PROPOSAL_STAGES = ['Queued','Collecting Requirements','Planning Proposal','Generating Solution','Estimating','Planning Resources','Defining Methodology','Preparing Documents','Creating Files'];
+const STAGE_AGENT:Record<string,string> = {'Queued':'Orchestrator','Building Context':'Orchestrator','Collecting Requirements':'RequirementsCollector','Planning Proposal':'ProposalCreator','Generating Solution':'ProposalCreator','Estimating':'EstimationsAgent','Planning Resources':'ResourcesAgent','Defining Methodology':'DeliveryMethodology','Designing Diagrams':'Diagrams Agent','Preparing Documents':'DocumentsAgent','Creating Files':'DocumentsAgent'};
+export const PROPOSAL_STAGES = ['Queued','Collecting Requirements','Planning Proposal','Generating Solution','Estimating','Planning Resources','Defining Methodology','Designing Diagrams','Preparing Documents','Creating Files'];
 const BUSY = ['Queued','Collecting Requirements','Drafting'];
 const size = (n:number)=>n>1048576?(n/1048576).toFixed(1)+' MB':Math.max(1,Math.round(n/1024))+' KB';
 const time = (s:string)=>new Date(s).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
 
-export function ProposalStart({onStart,disabled,templates,onManageTemplates}:{onStart:(request:string,formats:string[],cloud:string,files:File[],selection:TemplateSelection)=>Promise<void>;disabled:boolean;templates:ProposalTemplate[];onManageTemplates:()=>void}){
+export function ProposalStart({onStart,disabled,templates,onManageTemplates}:{onStart:(request:string,formats:string[],cloud:string,files:File[],selection:TemplateSelection,pricing?:PricingInputs)=>Promise<void>;disabled:boolean;templates:ProposalTemplate[];onManageTemplates:()=>void}){
  const [request,setRequest]=useState(''),[formats,setFormats]=useState<string[]>(['docx','pptx']),[cloud,setCloud]=useState('No preference'),[files,setFiles]=useState<File[]>([]);
+ const [pricing,setPricing]=useState<PricingInputs>(pricingDefaults);
  const [templateSelection,setTemplateSelection]=useState<TemplateSelection>({});
  const toggle=(f:string)=>setFormats(formats.includes(f)?formats.filter(x=>x!==f):[...formats,f]);
  return <section className="surface proposal-start">
@@ -45,7 +49,8 @@ export function ProposalStart({onStart,disabled,templates,onManageTemplates}:{on
    <label className="proposal-upload"><Upload size={15}/> {files.length?`${files.length} RFP file(s)`:'Attach RFP documents'}<input type="file" multiple accept=".pdf,.docx,.txt,.md" onChange={e=>setFiles(Array.from(e.target.files||[]))}/></label>
   </div>
   <div className="template-picker-heading"><h3>Proposal templates</h3><button className="text-button" onClick={onManageTemplates}>Manage templates</button></div><TemplateSelectors templates={templates} value={templateSelection} onChange={setTemplateSelection} disabled={disabled}/>
-  <div className="proposal-actions"><span className="muted">{request.trim().length<20?'Describe the RFP in at least 20 characters.':formats.length?'':'No format selected: the Proposal creator will decide.'}</span><button className="primary" disabled={disabled||request.trim().length<20} onClick={()=>onStart(request.trim(),formats,cloud,files,templateSelection)}><Send size={15}/> Send to Orchestrator</button></div>
+  <PricingOptions value={pricing} onChange={setPricing} disabled={disabled}/>
+  <div className="proposal-actions"><span className="muted">{request.trim().length<20?'Describe the RFP in at least 20 characters.':formats.length?'':'No format selected: the Proposal creator will decide.'}</span><button className="primary" disabled={disabled||request.trim().length<20} onClick={()=>onStart(request.trim(),formats,cloud,files,templateSelection,pricing)}><Send size={15}/> Send to Orchestrator</button></div>
  </section>;
 }
 

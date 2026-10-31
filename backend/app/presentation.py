@@ -16,6 +16,7 @@ from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
 from pptx.util import Inches, Pt
 
 from .schemas import Solution, calculate
+from .diagrams import DELIVERY
 
 NAVY = '14273F'
 BLUE = '315EA5'
@@ -170,23 +171,55 @@ class Briefing:
         else:
             slide._template_dark = template_background_is_dark(slide)
             slide._template_cover = dark
+        header = self.text(slide, textwrap.shorten(self.solution.title, width=100, placeholder='...'), .68, .23, 11.95, .25, 10, 'BDCEE3' if dark else MUTED)
+        header.name = 'Project header'
         display_title = textwrap.shorten(title, width=110, placeholder='…')
-        self.text(slide, display_title, .65, .65, 12, 1, 30 if len(display_title) < 45 else 24 if len(display_title) < 85 else 20, WHITE if dark else NAVY, True)
+        heading = self.text(slide, display_title, .65, .65, 12, 1, 30 if len(display_title) < 45 else 24 if len(display_title) < 85 else 20, WHITE if dark else NAVY, True)
+        heading.name = 'Slide title'
         if subtitle:
             self.text(slide, subtitle, .68, 1.62, 11.95, .48, 11, 'BDCEE3' if dark else MUTED)
-        self.text(slide, self.label, .68, 7.04, 10.9, .23, 9, 'BDCEE3' if dark else MUTED)
+        version = self.metadata.get('version')
+        footer = self.text(slide, (f'v{version} | ' if version is not None else '') + self.label, .68, 7.04, 10.9, .23, 9, 'BDCEE3' if dark else MUTED)
+        footer.name = 'Review footer'
         self.text(slide, f'{len(self.prs.slides):02d}', 12.05, 7.02, .55, .3, 10, 'BDCEE3' if dark else MUTED, align=PP_ALIGN.RIGHT)
         return slide
 
     def notes(self, slide, text):
         slide.notes_slide.notes_text_frame.text = str(text)
 
+    def diagram(self, diagram, rendered):
+        category = 'Delivery' if diagram.kind in DELIVERY else 'Solution architecture'
+        slide = self.slide(diagram.title, category + ' | Diagrams Agent | Proposed design; validate assumptions before implementation')
+        png = rendered.get(diagram.title)
+        self.rect(slide, .7, 2.2, 7.5, 4.5, PALE)
+        if png:
+            with Image.open(io.BytesIO(png)) as image:
+                ratio = min(7.22 / image.width, 4.22 / image.height)
+                w, h = image.width * ratio, image.height * ratio
+            slide.shapes.add_picture(io.BytesIO(png), Inches(.84 + (7.22-w)/2), Inches(2.34 + (4.22-h)/2), width=Inches(w), height=Inches(h))
+        else:
+            self.text(slide, 'Diagram export is unavailable. Retry the failed diagram in Files, then refresh the presentation.', .95, 2.65, 6.95, 2.8, 18)
+        description = diagram.description or 'A detailed explanation was not recorded for this older diagram. Regenerate the solution to request Diagrams Agent descriptions. Review the diagram and the source solution before implementation.'
+        chunks = list(pages(segments(description), width=42, max_lines=16))
+        self.text(slide, 'How to read this diagram', 8.5, 2.2, 4.05, .4, 17, NAVY, True)
+        self.text(slide, '\n'.join(chunks[0]), 8.5, 2.8, 4.05, 3.8, 14)
+        self.notes(slide, description + '\n\nMermaid source:\n' + diagram.source)
+        if len(chunks) > 1:
+            self.narrative(diagram.title + ': detailed description', '\n\n'.join(item for chunk in chunks[1:] for item in chunk), 'Continuation of the preceding diagram explanation')
+
     def narrative(self, title, text, subtitle='', sources=None):
-        chunks = list(pages(segments(text)))
-        for index, chunk in enumerate(chunks):
+        chunks = list(pages(segments(text), width=46, max_lines=12))
+        for offset in range(0, len(chunks), 2):
+            index = offset // 2
             heading = title if index == 0 else f'{title} (continued {index + 1})'
             slide = self.slide(heading, subtitle)
-            self.text(slide, '\n'.join(chunk), .7, 2.25, 11.9, 4.35, 18)
+            for column, chunk in enumerate(chunks[offset:offset + 2]):
+                x = .7 + column * 6.12
+                self.rect(slide, x, 2.2, 5.82, 4.5, PALE)
+                # A filled content card has its own contrast, including on dark templates.
+                box = self.text(slide, '\n'.join(chunk), x + .22, 2.46, 5.38, 3.98, 16)
+                for paragraph in box.text_frame.paragraphs:
+                    paragraph.font.color.rgb = RGBColor.from_string(INK)
             self.notes(slide, title + '\n\n' + text + ('\n\nReference passage IDs:\n' + '\n'.join(sources) if sources else ''))
         return chunks
 
@@ -260,6 +293,14 @@ def create_presentation(solution: Solution, provider: str, diagrams=None, metada
     remaining = [section for section in s.sections if section not in proposed]
     if not proposed:
         deck.narrative('Proposed solution', 'A separate solution narrative was not provided. Review the executive summary and detailed response before making architecture decisions.')
+    rendered = {title: png for title, png in diagrams or []}
+    for diagram in s.diagrams:
+        if diagram.kind not in DELIVERY:
+            deck.diagram(diagram, rendered)
+    if not s.diagrams:
+        deck.narrative('Architecture', 'No diagram was requested or provided for this response. Enable Diagrams when generating a new version to include rendered architecture views.')
+
+
     for section in proposed + remaining:
         # Parse actual Markdown tables into editable PowerPoint tables.
         lines = section.content.splitlines()
@@ -293,22 +334,20 @@ def create_presentation(solution: Solution, provider: str, diagrams=None, metada
                     expanded.append([part[n] if n < len(part) else '' for part in parts])
             deck.table(section.title, headers, expanded, [11.95 / len(headers)] * len(headers), section.classification.capitalize(), per_page=7)
 
-    rendered = {title: png for title, png in diagrams or []}
+    divider = deck.slide('Delivery', 'Resource management, RACII, estimation, development plan and methodology', dark=True)
+    deck.text(divider, 'People and ownership\nEffort and dependencies\nDevelopment and governance', .8, 2.5, 11.6, 3.4, 30, WHITE)
     for diagram in s.diagrams:
-        slide = deck.slide(diagram.title, diagram.kind.capitalize() + ' architecture. Editable Mermaid source is included separately in the package.')
-        png = rendered.get(diagram.title)
-        if png:
-            image = Image.open(io.BytesIO(png))
-            ratio = min(11.85 / image.width, 4.55 / image.height)
-            w, h = image.width * ratio, image.height * ratio
-            deck.rect(slide, .68, 2.15, 11.95, 4.65, PALE)
-            slide.shapes.add_picture(io.BytesIO(png), Inches((WIDTH - w) / 2), Inches(2.2 + (4.55 - h) / 2), width=Inches(w), height=Inches(h))
-        else:
-            deck.text(slide, 'Diagram export is unavailable. Retry the failed diagram in Files, then refresh the presentation. The Mermaid source remains available for review.', .75, 2.7, 11.7, 2.2, 21)
-        deck.notes(slide, diagram.source)
-    if not s.diagrams:
-        deck.narrative('Architecture', 'No diagram was requested or provided for this response. Enable Diagrams when generating a new version to include rendered architecture views.')
+        if diagram.kind in DELIVERY and diagram.kind != 'estimations':
+            deck.diagram(diagram, rendered)
+            if diagram.kind == 'racii' and s.racii:
+                deck.table('RACII Matrix', ['Activity', 'R', 'A', 'C', 'I', 'I2'],
+                    [[r.activity,r.responsible,r.accountable,r.consulted,r.informed,r.involved] for r in s.racii],
+                    [3.2,1.75,1.75,1.75,1.75,1.75], 'Proposed assignments for stakeholder review', per_page=4,
+                    note='R: Responsible | A: Accountable | C: Consulted | I: Informed | I2: Involved. Confirm named owners before execution.')
 
+    for diagram in s.diagrams:
+        if diagram.kind == 'estimations':
+            deck.diagram(diagram, rendered)
     slide = deck.slide('Estimation overview', 'Indicative effort in person-days. Contingency included. Implementation and operating costs remain separate.')
     if s.estimates:
         for i, (key, label) in enumerate([('low', 'LOW'), ('expected', 'EXPECTED'), ('high', 'HIGH')]):
@@ -359,6 +398,22 @@ def create_presentation(solution: Solution, provider: str, diagrams=None, metada
     costs = totals['implementation_cost']
     cost_text = ('\n\n'.join(f'{label}: {s.currency} {number(costs[key])}' for key, label in [('low', 'Low implementation cost'), ('expected', 'Expected implementation cost'), ('high', 'High implementation cost')]) + f'\n\nIncludes {number(s.contingency_percent)}% contingency. Rates are per person-day.' if costs else 'Implementation cost is not priced. Supply a daily rate for every workstream to calculate low, expected and high implementation costs.')
     deck.narrative('Implementation cost', cost_text, 'Calculated from supplied rates only')
+    commercial = totals['commercial']
+    amount = lambda value: f'{s.currency} {number(value)}' if value is not None else 'Not priced: rates or terms required'
+    deck.table('Commercial estimation basis', ['Item','Value'], [
+        ['Selected model',commercial['label']],
+        ['Expected base cost (before contingency)',amount(commercial['base_cost']['expected'] if commercial['base_cost'] else None)],
+        ['Indicative fixed-price baseline',amount(commercial['indicative_fixed_price']) if s.commercial_model == 'fixed_price' else 'Not the selected commercial model'],
+        ['Proposed variation cost',amount(commercial['variation_cost'])],
+        ['Expected with variations',amount(commercial['expected_with_variations'])],
+        ['Budget cap',amount(commercial['budget_cap']) if commercial['budget_cap'] is not None else 'Not supplied'],
+    ], [5.6,6.35], 'Indicative calculation from supplied rates; commercial approval is required', per_page=6)
+    if commercial['variations']:
+        deck.table('Proposed estimate variations', ['Change','Role','Person-days','Rate / day','Amount'],
+            [[v['name'],v['role'],number(v['effort_days']),amount(v['rate']),amount(v['amount'])] for v in commercial['variations']],
+            [3.4,2.65,1.5,2.2,2.2], 'Scope changes are separate from the baseline and require approval', per_page=5)
+    deck.narrative('Commercial assumptions and missing inputs', '\n\n'.join([commercial['basis'],commercial['note'],*commercial['missing_inputs'],
+        *(['Projected cost exceeds the supplied cap. Reconcile scope, rates or the cap before agreement.'] if commercial['exceeds_cap'] else [])]))
     if s.estimates:
         deck.narrative('Rate assumptions', '\n\n'.join(rates), f'Currency: {s.currency}. Daily rates are distinct from total cost.')
     deck.narrative('Operating costs and exclusions', 'Recurring operating costs\n\n' + (s.operating_cost_note or 'No operating-cost information was supplied.') + '\n\nExclusions\n\n' + ('\n\n'.join(s.exclusions) or 'No exclusions were provided.'), 'Recurring consumption and licenses are separate from implementation effort')
